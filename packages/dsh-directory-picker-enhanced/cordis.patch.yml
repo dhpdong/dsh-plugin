@@ -1,0 +1,10 @@
+# Replace dsh-mobile's stock browse directory picker surface with an
+# enhanced browse UI that adds an Up button and a Windows drive selector.
+
+- id: directory-picker-mobile-surface
+  name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+  disabled: true
+
+- insert:
+    - id: directory-picker-enhanced-surface
+      name: dsh-directory-picker-enhanced

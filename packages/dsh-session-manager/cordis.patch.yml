@@ -1,0 +1,4 @@
+# dsh-session-manager: permanently delete persisted sessions.
+- insert:
+    - id: session-manager
+      name: 'dsh-session-manager'

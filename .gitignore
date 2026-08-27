@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build sourcemaps (heavy; rebuilt locally)
+*.map
+
+# Logs / OS / editor
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Env
+.env
+.env.*
