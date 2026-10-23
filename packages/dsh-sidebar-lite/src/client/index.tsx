@@ -17,7 +17,7 @@ import { revalidateChunksOnReactivate, setChunkModuleSystem } from './chunk-load
 import { registerBuiltins } from './builtins/index.ts'
 import { Sidebar } from './Sidebar.tsx'
 import { RenderBoundary } from './RenderBoundary.tsx'
-import { registerOpenPathInterception, registerTurnTailInterception } from './intercept.tsx'
+import { registerOpenPathInterception } from './intercept.tsx'
 import { registerLinkInterception } from './link-intercept.ts'
 import { registerImeGuard } from './ime-guard.ts'
 import { registerSettingsNavIcon } from './settings-nav-icon.ts'
@@ -306,18 +306,6 @@ export function apply(ctx: Context): void {
         unmount()
       }
     }, 'dsh-sidebar-lite: sidebar mount')
-
-    ctx.effect(
-      () => {
-        try {
-          return registerTurnTailInterception(ctx, sidebarStore)
-        } catch (error) {
-          fail('interception', error)
-          return () => {}
-        }
-      },
-      'dsh-sidebar-lite: turn-tail interception',
-    )
 
     ctx.effect(
       () => {

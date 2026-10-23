@@ -1,0 +1,4 @@
+# dsh-inline-diff: always-expanded Edit/Write diffs in the conversation.
+- insert:
+    - id: inline-diff
+      name: 'dsh-inline-diff'

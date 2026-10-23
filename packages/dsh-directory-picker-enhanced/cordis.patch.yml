@@ -1,10 +1,18 @@
-# Replace dsh-mobile's stock browse directory picker surface with an
-# enhanced browse UI that adds an Up button and a Windows drive selector.
+# Replace the stock browse directory-picker surface with the enhanced browse
+# UI (Up button + Windows drive selector).
+#
+# DSH 0.2 mounts the picker pair dynamically from `directory-picker-auto`, so
+# the old `directory-picker-mobile-surface` row no longer exists. Pin the
+# browse backend and mount only this enhanced UI surface instead: the official
+# client surface is never inserted, so the single-occupant directory-flow
+# holes have exactly one registrant.
 
-- id: directory-picker-mobile-surface
-  name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
   disabled: true
 
 - insert:
+    - id: directory-picker-browse-host
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
     - id: directory-picker-enhanced-surface
-      name: dsh-directory-picker-enhanced
+      name: 'dsh-directory-picker-enhanced'

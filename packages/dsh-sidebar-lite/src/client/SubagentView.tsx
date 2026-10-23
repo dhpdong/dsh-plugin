@@ -23,7 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { useSyncExternalStore } from 'react'
 import clsx from 'clsx'
 import {
-  IconRefreshOutline14, StateDot,
+  IconRefreshOutlineRegular, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   Context,
@@ -271,7 +271,7 @@ function CatalogRows({
             className={css.subagentErrorRetry}
             onClick={() => { refresh(parentSessionId) }}
           >
-            <IconRefreshOutline14 />
+            <IconRefreshOutlineRegular />
             {t('retry')}
           </button>
         </div>
@@ -723,7 +723,9 @@ export function SubagentView(props: {
   const openMain = useCallback((): void => {
     if (rootId === undefined) return
     try {
-      sessions.open?.(rootId)
+      const workspace = ctx.get('uiWorkspace') as { openSession?(id: string): void } | undefined
+      if (workspace?.openSession !== undefined) workspace.openSession(rootId)
+      else sessions.open?.(rootId)
     } catch (error) {
       console.warn('[dsh-sidebar-lite] open session failed:', error)
     }
@@ -800,7 +802,7 @@ export function SubagentView(props: {
           disabled={rootId === undefined}
           onClick={() => { if (rootId !== undefined) refresh(rootId) }}
         >
-          <IconRefreshOutline14 />
+          <IconRefreshOutlineRegular />
         </button>
       </div>
       <div

@@ -7,7 +7,6 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
-		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
 		//#region ../../../node_modules/.pnpm/clsx@2.1.1/node_modules/clsx/dist/clsx.mjs
 		function r(e) {
 			var t, f, n = "";
@@ -112,7 +111,7 @@ window.__ModuleLoader__.load({
 		*/
 		/** Failure text: the Host business message when typed, else the throw's text. */
 		function failureText(error) {
-			if (error instanceof _deepseek_ai_dsh_client_runtime_client.DirectoryBrowseError) return error.rpcError.message;
+			if (error !== null && typeof error === "object" && error.rpcError !== undefined && typeof error.rpcError.message === "string") return error.rpcError.message;
 			return error instanceof Error ? error.message : String(error);
 		}
 		/**
@@ -1051,7 +1050,7 @@ window.__ModuleLoader__.load({
 		/** Required services (cordis fiber inject): the slot registry, the wire-facing workspace service, and locale. */
 		const inject = [
 			"slots",
-			"workspaces",
+			"uiWorkspace",
 			"locale"
 		];
 		/**
@@ -1109,8 +1108,8 @@ window.__ModuleLoader__.load({
 				};
 			}, "directory-picker-browse: dialog dictionaries");
 			const injected = () => ({
-				listDirectory: (path, signal) => ctx.workspaces.listDirectory(path, signal),
-				createDirectory: (path, name) => ctx.workspaces.createDirectory(path, name),
+				listDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
+				createDirectory: (path, name) => ctx.uiWorkspace.createDirectory(path, name),
 				t: ctx.locale.bind(LOCALE_NS)
 			});
 			ctx.slots.inject("conversation.hero.workspace.directoryFlow", () => ctx.slots.inject("sidebar.workspaces.directoryFlow", function* () {

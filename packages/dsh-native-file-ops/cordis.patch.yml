@@ -1,0 +1,5 @@
+# dsh-native-file-ops: enhance the NATIVE right-Sidebar file tree with
+# create / rename / move / trash / download / copy-path operations.
+- insert:
+    - id: native-file-ops
+      name: 'dsh-native-file-ops'
