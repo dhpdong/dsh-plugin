@@ -10,7 +10,7 @@ DSH Web 插件：给 **原生右侧栏的文件树** 补齐文件操作，不再
 
 不替换原生文件树，不加第二个侧边栏，只监听原生行上的 `data-files-path` 事件。
 
-依赖 `dsh-sidebar-lite` 已安装：新建/重命名/移动/回收站走它的
+**依赖 `dsh-sidebar-lite` 已安装并挂载**：新建/重命名/移动/回收站走它的
 `/sidebar/api/fs.*`，下载走 `/sidebar/file?...&download=1`。这两条路由是
 DSH Web 在局域网地址下仍能通过浏览器鉴权的 carrier；本插件不再依赖自己的
 POST 路由。
@@ -21,9 +21,10 @@ POST 路由。
 // ~/.dsh/profiles/web/package.json
 {
   "dependencies": {
+    "dsh-sidebar-lite": "file:<repo>/packages/dsh-sidebar-lite",
     "dsh-native-file-ops": "file:<repo>/packages/dsh-native-file-ops"
   },
-  "dsh": { "profile": { "bundles": [/* … */, "dsh-native-file-ops"] } }
+  "dsh": { "profile": { "bundles": [/* … */, "dsh-sidebar-lite", "dsh-native-file-ops"] } }
 }
 ```
 
@@ -32,13 +33,15 @@ cd ~/.dsh/profiles/web && pnpm install
 # 重启 dsh web，硬刷新浏览器
 ```
 
-宿主端注册一条围栏路由 `/native-file-ops/api`（与侧边栏使用同一套 Host/Origin 信任规则），
-只接受工作区内的绝对/相对路径，拒绝 `..` 越界。
+宿主端仍保留一条自带围栏路由 `/native-file-ops/api`（与侧边栏共用 Host/Origin 信任规则），
+供不依赖 `dsh-sidebar-lite` 的部署使用；当前文件操作走的是上文的 `/sidebar/api/*` carrier。
 
 ## 与 dsh-sidebar-lite 的关系
 
-两者可共存：本插件只增强原生的文件树；dsh-sidebar-lite 的编辑器/终端/Git 等仍可在它自己的面板里使用。
-如果只想保留原生侧边栏，把 `dsh-sidebar-lite` 从 profile 的 `bundles` 里移除即可。
+**必须同时安装 `dsh-sidebar-lite`**：本插件只增强原生文件树，所有文件操作都经它的
+`/sidebar/api/*` carrier 落到宿主。`dsh-sidebar-lite` 在本 fork 中不再显示自己的右侧
+面板，只提供宿主 API、底部终端和兼容层；它的 `fs.trash` / `fs.create` / 下载路由正是
+本插件的后端。
 
 ## 验证
 

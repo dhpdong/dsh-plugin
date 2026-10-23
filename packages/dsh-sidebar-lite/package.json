@@ -1,7 +1,7 @@
 {
   "name": "dsh-sidebar-lite",
   "version": "0.17.0",
-  "description": "DSH web plugin: a VSCode-like right sidebar (explorer / editor / terminal / git / browser), isolated per conversation session. Exposes a service for other plugins to register sidebar tabs and file viewers.",
+  "description": "DSH web plugin (this fork): host /sidebar API carrier for native file operations, downloads and directory listings, plus the bottom terminal panel; the native right Sidebar + dsh-native-file-ops provide the file UI.",
   "type": "module",
   "repository": {
     "type": "git",
