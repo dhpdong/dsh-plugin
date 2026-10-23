@@ -33,8 +33,8 @@ cd ~/.dsh/profiles/web && pnpm install
 # 重启 dsh web，硬刷新浏览器
 ```
 
-宿主端仍保留一条自带围栏路由 `/native-file-ops/api`（与侧边栏共用 Host/Origin 信任规则），
-供不依赖 `dsh-sidebar-lite` 的部署使用；当前文件操作走的是上文的 `/sidebar/api/*` carrier。
+宿主端还保留一条历史围栏路由 `/native-file-ops/api`（与侧边栏共用 Host/Origin 信任规则），
+当前客户端不再使用；文件操作统一走 `/sidebar/api/*` carrier，因此 `dsh-sidebar-lite` 是必需依赖。
 
 ## 与 dsh-sidebar-lite 的关系
 
