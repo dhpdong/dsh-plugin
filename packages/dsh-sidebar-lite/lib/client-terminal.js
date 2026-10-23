@@ -8943,6 +8943,22 @@ globalThis.__dshChunks__["terminal"] = (require) => {
 			});
 			const fit = new import_addon_fit.FitAddon();
 			term.loadAddon(fit);
+			// Desktop copy/paste: xterm's default turns Ctrl+C / Ctrl+V into
+			// control bytes, so a selection never reaches the clipboard and
+			// Ctrl+V never reaches the browser. Returning false WITHOUT
+			// preventDefault skips xterm's key handling while letting the
+			// browser fire its own copy/paste events (xterm's built-in element
+			// listeners move the selection / insert the clipboard text). Plain
+			// Ctrl+C with no selection keeps SIGINT; on macOS Cmd+C copies and
+			// Ctrl+C still interrupts.
+			const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+			term.attachCustomKeyEventHandler((event) => {
+				if (event.type !== "keydown" || event.altKey) return true;
+				if (!event.ctrlKey && !event.metaKey) return true;
+				if (event.code === "KeyC") return (isMac ? event.metaKey : true) && term.hasSelection() ? false : true;
+				if (event.code === "KeyV") return false;
+				return true;
+			});
 			const applyTheme = () => {
 				term.options.theme = xtermTheme();
 				term.refresh(0, term.rows - 1);

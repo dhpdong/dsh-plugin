@@ -129,6 +129,24 @@ export function TerminalView(props: { scope: SessionScope; tabId: string; store:
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    // Desktop copy/paste. xterm's default turns Ctrl+C / Ctrl+V into control
+    // bytes, so a selected block never reaches the clipboard and Ctrl+V never
+    // reaches the browser. Returning false WITHOUT preventDefault skips
+    // xterm's key handling while letting the browser fire its own copy/paste
+    // events; xterm's built-in element listeners then move the selection or
+    // insert the clipboard text. Plain Ctrl+C with no selection still sends
+    // SIGINT, and on macOS Cmd+C copies while Ctrl+C keeps interrupting.
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown' || event.altKey) return true
+      if (!event.ctrlKey && !event.metaKey) return true
+      if (event.code === 'KeyC') {
+        const copy = isMac ? event.metaKey : true
+        return copy && term.hasSelection() ? false : true
+      }
+      if (event.code === 'KeyV') return false
+      return true
+    })
     // Re-theme in place when the app's scheme flips (tokens + palette).
     const applyTheme = (): void => {
       term.options.theme = xtermTheme()
