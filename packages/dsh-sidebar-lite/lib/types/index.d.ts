@@ -37,11 +37,13 @@ export interface SidebarSettingsFace {
         revision?: number;
     }>;
 }
-/**
- * Plugin body: mount the fenced routes and the pty lifecycle.
- * @param ctx - host plugin context (webServer, sessions, webRuntime).
- * @param config - deployment-provided limits; the Loader validates against
- * {@link Config} and fills defaults, direct callers get them from
- * {@link resolveSidebarConfig}.
- */
+/** Refusal to overwrite side-card preferences changed since the form read them. */
+export declare class SidebarPrefsConflictError extends Error {
+    /** Stable machine code the route maps back to `settings-conflict`. */
+    readonly code = "SETTINGS_CONFLICT";
+    /**
+     * @param message - human-readable conflict detail.
+     */
+    constructor(message: string);
+}
 export declare function apply(ctx: Context, config?: SidebarConfig): void;

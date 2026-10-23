@@ -18,6 +18,8 @@ window.__ModuleLoader__.load({
     var module = { exports: {} }
     var exports = module.exports
     var React = require('react')
+    var primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    var IconTrash = primitives.IconTrashOutlineRegular
 
     var useState = React.useState
     var useCallback = React.useCallback
@@ -155,16 +157,26 @@ window.__ModuleLoader__.load({
         return function () { document.removeEventListener('mousedown', handle) }
       }, [open])
 
-      return h('div', { ref: containerRef, style: { position: 'relative', display: 'inline-flex' } },
+      // Sized to the header's 28px action rhythm and pinned to a fixed flex
+      // basis: a content-sized wrapper can collapse under the utilities flex
+      // row and let the glyph spill into the corner (sidebar toggle) button.
+      return h('div', {
+        ref: containerRef,
+        style: {
+          position: 'relative', display: 'inline-flex', flex: '0 0 28px', flexShrink: 0,
+          minWidth: '28px', width: '28px', height: '28px', alignItems: 'center', justifyContent: 'center',
+        },
+      },
         h('button', {
           type: 'button', 'aria-label': '会话管理', title: '会话管理',
           style: {
-            background: 'none', border: 'none', cursor: 'pointer',
+            background: 'none', border: 'none', cursor: 'pointer', padding: '0',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             width: '28px', height: '28px', borderRadius: '4px', color: '#999',
+            flex: '0 0 28px', boxSizing: 'border-box',
           },
           onClick: function () { setOpen(!open) },
-        }, '🗑️'),
+        }, h(IconTrash, { size: 16 })),
         open ? h(SessionListPanel, { sessionId: sessionId }) : null
       )
     }

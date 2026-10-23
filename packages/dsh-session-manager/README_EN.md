@@ -6,6 +6,17 @@ A DSH web plugin: **permanently delete sessions you no longer need**.
 
 Adds a 🗑️ button to the right of the session header (next to Session log). Click it to list every persisted session; delete the ones you are done with — their on-disk records move to the **OS recycle bin** and the workspace session list stays clean. It fills the gap DSH leaves open: archiving only hides, deleting a workspace only ungroups.
 
+## DSH 0.2.1 compatibility
+
+DSH 0.2 replaced the persistence surface with snapshots and per-session
+handles: `sessionPersistence.list()` now returns `{ header, revision }`, and
+`locate()` / `inspect()` are gone. This plugin therefore reads identity and
+cwd from the snapshot header, titles live sessions through `sessionTitle`,
+locates the artifact directory under
+`<$DSH_HOME>/sessions/<project>/<session-id>/`, archives the row through
+`workspaceController.archiveSession()` before deletion, and refuses to delete
+a session that is still running (its write lease must stay intact).
+
 ## Why
 
 DSH offers exactly two dispositions for a session:

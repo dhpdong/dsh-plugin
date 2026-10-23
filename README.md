@@ -2,11 +2,18 @@
 
 DSH（DeepSeek Harness）Web 插件集——单仓多插件结构，**每个插件都是独立可安装的包**（参照 [zhu1090093659/dsh-web](https://github.com/zhu1090093659/dsh-web) 的组织方式）。
 
+> **当前适配 DSH 0.2.1-rc.2**（2026-10）。0.2 移除了 `webRuntime`、
+> `ctx.settings.register`、`invariants`、客户端 `workspaces.openPath` 等
+> 0.1 接口；本仓库的插件已按 0.2.1 的服务/槽位/模块表重写，旧版 0.1.x
+> 宿主请使用本适配提交之前的版本。
+
 | 插件 | 功能 | 依赖 |
 |---|---|---|
 | [dsh-sidebar-lite](packages/dsh-sidebar-lite) | VSCode 风格右侧工作台（文件 / 终端 / Git / 浏览器…）；本 fork 新增**移到回收站**、**新建文件/文件夹** | 见其 package.json（node-pty 等） |
 | [dsh-session-manager](packages/dsh-session-manager) | 会话标题栏 🗑️ 按钮，**彻底删除**不再需要的会话（移入系统回收站） | 零依赖 |
 | [dsh-directory-picker-enhanced](packages/dsh-directory-picker-enhanced) | 「添加工作区」目录选择器增强：**上一级**按钮 + **盘符下拉** | 零依赖 |
+| [dsh-inline-diff](packages/dsh-inline-diff) | Edit / Write 工具 diff 在对话中**常驻展开**（Claude Code 风格） | 零依赖 |
+| [dsh-native-file-ops](packages/dsh-native-file-ops) | **原生右侧栏文件树增强**：右键新建/重命名/下载/回收站/复制路径 + 拖拽移动 | `trash` |
 
 ## 安装单个插件
 
@@ -19,14 +26,16 @@ DSH（DeepSeek Harness）Web 插件集——单仓多插件结构，**每个插�
   "dependencies": {
     "dsh-sidebar-lite": "file:<本仓库>/packages/dsh-sidebar-lite",
     "dsh-session-manager": "file:<本仓库>/packages/dsh-session-manager",
-    "dsh-directory-picker-enhanced": "file:<本仓库>/packages/dsh-directory-picker-enhanced"
+    "dsh-directory-picker-enhanced": "file:<本仓库>/packages/dsh-directory-picker-enhanced",
+    "dsh-inline-diff": "file:<本仓库>/packages/dsh-inline-diff"
   },
   "dsh": {
     "profile": {
       "bundles": [
         "dsh-sidebar-lite",
         "dsh-session-manager",
-        "dsh-directory-picker-enhanced"
+        "dsh-directory-picker-enhanced",
+        "dsh-inline-diff"
       ]
     }
   }
@@ -35,7 +44,7 @@ DSH（DeepSeek Harness）Web 插件集——单仓多插件结构，**每个插�
 
 然后在 profile 目录 `pnpm install`（或直接把 `packages/<name>` 复制到 profile 的 `node_modules/` 下），重启 `dsh web --no-open` 并硬刷新浏览器。
 
-> `dsh-directory-picker-enhanced` 必须排在 `dsh-mobile` 之后（其 patch 会禁用 dsh-mobile 插入的官方选择器 UI）。
+> 0.2 的目录选择器由 `directory-picker-auto` 在启动时动态挂载；`dsh-directory-picker-enhanced` 的 patch 会停用该自动选择行，改挂官方 browse 后端 + 本插件前端（见其 README）。
 
 ### 从 GitHub（推送后）
 

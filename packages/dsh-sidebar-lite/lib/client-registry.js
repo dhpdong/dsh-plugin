@@ -313,10 +313,6 @@ window.__ModuleLoader__.load({
 		function floatWithTab(state, tabId) {
 			return state.floats.find((float) => float.tab.id === tabId);
 		}
-		/** The free window with the given window id, if any. */
-		function floatById(state, floatId) {
-			return state.floats.find((float) => float.id === floatId);
-		}
 		/**
 		* Split a leaf by inserting a fresh leaf holding `tab` beside it — the
 		* VSCode drag-to-edge gesture. `dir` is the split direction ('row' for
@@ -804,39 +800,6 @@ window.__ModuleLoader__.load({
 			if (emptied && state.activePane === source.id) next.activePane = firstLeaf(next.splits).id;
 			return next;
 		}
-		/** Move a free window (clamped to the viewport); unknown ids are a no-op. */
-		function moveFloat(state, floatId, x, y) {
-			const float = floatById(state, floatId);
-			if (float === void 0) return state;
-			const geo = clampFloatGeometry(x, y, float.w, float.h);
-			if (geo.x === float.x && geo.y === float.y) return state;
-			return {
-				...state,
-				floats: state.floats.map((f) => f.id === floatId ? {
-					...f,
-					...geo
-				} : f)
-			};
-		}
-		/** Resize a free window from its SE corner: the top-left corner stays
-		*  anchored, sizes clamp to the floor and to the viewport's remaining room. */
-		function resizeFloat(state, floatId, w, h) {
-			const float = floatById(state, floatId);
-			if (float === void 0) return state;
-			const vw = viewportW();
-			const vh = viewportH();
-			const width = Math.round(Math.min(Math.max(w, 320), Math.max(320, vw - float.x)));
-			const height = Math.round(Math.min(Math.max(h, 200), Math.max(200, vh - float.y)));
-			if (width === float.w && height === float.h) return state;
-			return {
-				...state,
-				floats: state.floats.map((f) => f.id === floatId ? {
-					...f,
-					w: width,
-					h: height
-				} : f)
-			};
-		}
 		/** Bring a free window to the top (the array's end). Already topmost (or the
 		*  only window) returns the same reference — no persist churn on every click. */
 		function raiseFloat(state, floatId) {
@@ -849,26 +812,6 @@ window.__ModuleLoader__.load({
 			return {
 				...state,
 				floats
-			};
-		}
-		/** Dock a free window back into a pane (center merge): the tab joins the
-		*  target pane and activates. `toPane` defaults to the active pane with the
-		*  right tree's first leaf as the stale-id fallback (mirrors
-		*  {@link openTabInActivePane}). Unknown window ids are a no-op. */
-		function dockFloat(state, floatId, toPane) {
-			const float = floatById(state, floatId);
-			if (float === void 0) return state;
-			let targetId = toPane ?? state.activePane ?? firstLeaf(state.splits).id;
-			if (!allLeaves(state[treeOf(state, targetId)]).some((leaf) => leaf.id === targetId)) targetId = firstLeaf(state.splits).id;
-			const targetKey = treeOf(state, targetId);
-			return {
-				...state,
-				floats: state.floats.filter((f) => f.id !== floatId),
-				activePane: targetId,
-				[targetKey]: mapLeaf(state[targetKey], targetId, (leaf) => {
-					leaf.tabs = [...leaf.tabs, float.tab];
-					leaf.active = float.tab.id;
-				})
 			};
 		}
 		/** Close the free window holding a tab (the tab closes WITH the window —
@@ -1364,6 +1307,19 @@ window.__ModuleLoader__.load({
 		function createSidebarStore() {
 			return new SidebarStore();
 		}
+		/**
+		* Resolve the conversation currently shown in the main view.
+		*
+		* DSH 0.2 removed `SessionListState.current`; the current Session is the row
+		* retained by the `mainView` source (the same rule ui-session uses to publish
+		* its main binding). Reading it from the list snapshot keeps the sidebar
+		* subscribed to one store.
+		* @param list - the client Session list snapshot.
+		* @returns the current Session id, or undefined when no Session is open.
+		*/
+		function currentSessionIdOf(list) {
+			for (const id of list.ids) if (((list.byId[id]?.retainedBy)?.mainView ?? 0) > 0) return id;
+		}
 		//#endregion
 		//#region src/client/service.ts
 		/** Extract the lowercase extension without leading dot from a path. */
@@ -1709,8 +1665,7 @@ window.__ModuleLoader__.load({
 			"react-dom/client",
 			"cordis",
 			"@deepseek-ai/dsh-client-ui-slots",
-			"@deepseek-ai/dsh-client-ui-primitives",
-			"@deepseek-ai/dsh-client-runtime/client"
+			"@deepseek-ai/dsh-client-ui-primitives"
 		];
 		/** Chunk script endpoint served by the plugin host half (src/bundle-route.ts). */
 		const CHUNK_URL = (name) => `/sidebar/bundle/${name}.js`;
@@ -9644,89 +9599,6 @@ window.__ModuleLoader__.load({
 		* Kept dependency-free so the takeover logic is unit-testable and the
 		* replica is easy to diff against upstream when it drifts.
 		*/
-		/** Paths a tool-result view reports as produced, by render intent. */
-		function producedPaths(view) {
-			if (view === null || typeof view !== "object") return [];
-			const record = view;
-			if (!(record.card === "diff" || record.card === "generic" && record.kind === "edit")) return [];
-			if (!Array.isArray(record.locations)) return [];
-			const paths = [];
-			for (const location of record.locations) if (location !== null && typeof location === "object" && typeof location.path === "string") paths.push(location.path);
-			return paths;
-		}
-		/**
-		* Files produced by the turn the assistant at `seq` closes. Accumulation
-		* resets on turn boundaries (a user message, or a node reporting a different
-		* turn number); paths keep first-seen order and appear once.
-		* @param nodes - snapshot nodes in surface order (structural, unknown-safe).
-		* @param seq - the closing assistant's seq (the render site's anchor).
-		* @returns produced paths; empty when the turn wrote nothing.
-		*/
-		function producedForClosing(nodes, seq) {
-			let pending = [];
-			let seen = /* @__PURE__ */ new Set();
-			let turn;
-			for (const node of nodes) {
-				if (node === null || typeof node !== "object") continue;
-				const record = node;
-				if (record.kind === "tool-result") {
-					if (record.isError === true) continue;
-					for (const path of producedPaths(record.callView)) {
-						if (seen.has(path)) continue;
-						seen.add(path);
-						pending.push(path);
-					}
-					continue;
-				}
-				if (record.kind === "user") {
-					turn = void 0;
-					pending = [];
-					seen = /* @__PURE__ */ new Set();
-				} else if (typeof record.turn === "number") {
-					if (turn !== void 0 && record.turn !== turn) {
-						pending = [];
-						seen = /* @__PURE__ */ new Set();
-					}
-					turn = record.turn;
-				}
-				if (record.kind === "assistant" && record.seq === seq) return pending;
-			}
-			return [];
-		}
-		/**
-		* Claim the turn-tail chain only when the closing turn produced files.
-		*
-		* The authoritative source is the engine Turn data — the same value
-		* ui-deliverables reads (`owner.turn.data.get('deliverables')`): a
-		* `{ produced: [{ seq, path }, ...] }` record accumulated per Turn. The
-		* node-based replica below stays as a fallback for compositions that do not
-		* publish it.
-		* @param owner - the turn-tail owner currency ({turn, seq, openFile}).
-		* @returns produced paths as the matched value, or null to decline.
-		*/
-		function selectProducedFiles(owner) {
-			const record = owner;
-			if (record === null || typeof record !== "object") return null;
-			const seq = typeof record.seq === "number" ? record.seq : Number.POSITIVE_INFINITY;
-			const data = record.turn?.data?.get?.("deliverables");
-			if (data !== null && typeof data === "object" && Array.isArray(data.produced)) {
-				const paths = [];
-				const seen = /* @__PURE__ */ new Set();
-				for (const item of data.produced) {
-					if (item === null || typeof item !== "object") continue;
-					const produced = item;
-					if (typeof produced.path !== "string" || produced.path === "") continue;
-					if (typeof produced.seq === "number" && produced.seq > seq) continue;
-					if (seen.has(produced.path)) continue;
-					seen.add(produced.path);
-					paths.push(produced.path);
-				}
-				return paths.length === 0 ? null : paths;
-			}
-			if (!Array.isArray(record.nodes)) return null;
-			const paths = producedForClosing(record.nodes, seq);
-			return paths.length === 0 ? null : paths;
-		}
 		/**
 		* Resolve a (possibly relative) path against the session cwd for the sidebar.
 		* Absolute detection mirrors the host (see client/paths.isAbsolutePath):
@@ -9781,8 +9653,8 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region \0dsh-css:K:\work\project\dsh\dsh-sidebar-lite\src\client\sidebar.module.css.mjs
-		const css$4 = "[data-dsh-panel-host]{z-index:25;pointer-events:none;position:fixed;inset:0;overflow:hidden}[data-dsh-panel-host][data-dsh-panel-host-degraded]{position:absolute;top:0;left:0}.xoxv9G_toggleCluster{top:calc(3px + env(safe-area-inset-top));z-index:45;pointer-events:auto;flex-direction:row;gap:4px;display:flex;position:absolute;right:10px}.xoxv9G_panel:not(.xoxv9G_panelHidden) .xoxv9G_tabBar{padding-right:72px}.xoxv9G_toggleButton{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out), color var(--ds-transition-duration-slow) var(--ds-ease-in-out);background:0 0;border:none;border-radius:50%;justify-content:center;align-items:center;display:flex}.xoxv9G_toggleButton:hover:not(:disabled):not([aria-disabled=true]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_toggleButton:disabled,.xoxv9G_toggleButton[aria-disabled=true]{opacity:.4;cursor:default}.xoxv9G_panel{box-sizing:border-box;z-index:40;pointer-events:auto;background:var(--dsw-alias-bg-layer-1);border-left:1px solid var(--dsw-alias-border-l2);padding-bottom:env(safe-area-inset-bottom);transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out);flex-direction:column;display:flex;position:absolute;top:0;bottom:0;right:0}.xoxv9G_panelHidden{pointer-events:none;visibility:hidden;transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out), visibility 0s linear var(--ds-transition-duration-slow);transform:translate(102%)}.xoxv9G_panel[data-dragging]{transition:none}.xoxv9G_panelResize{cursor:col-resize;z-index:2;touch-action:none;width:8px;position:absolute;top:0;bottom:0;left:-4px}.xoxv9G_panelResizeActive{background:var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_panelBody{flex:1;min-width:0;min-height:0;display:flex}.xoxv9G_bottomPanel{z-index:40;background:var(--dsw-alias-bg-layer-1);border-top:1px solid var(--dsw-alias-border-l2);pointer-events:auto;padding-bottom:env(safe-area-inset-bottom);transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), height var(--ds-transition-duration-slow) var(--ds-ease-in-out);flex-direction:column;display:flex;position:absolute;bottom:0}.xoxv9G_bottomPanelHidden{pointer-events:none;visibility:hidden;transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), height var(--ds-transition-duration-slow) var(--ds-ease-in-out), visibility 0s linear var(--ds-transition-duration-slow);transform:translateY(102%)}.xoxv9G_bottomPanel[data-dragging]{transition:none}.xoxv9G_panel,.xoxv9G_bottomPanel{contain:layout style}body[data-dsh-sidebar-dragging] .xoxv9G_panel,body[data-dsh-sidebar-dragging] .xoxv9G_bottomPanel{will-change:transform}.xoxv9G_bottomResize{cursor:row-resize;z-index:2;touch-action:none;height:8px;position:absolute;top:-4px;left:0;right:0}.xoxv9G_bottomResizeActive{background:var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_bottomClose{z-index:4;width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex;position:absolute;top:3px;right:6px}.xoxv9G_bottomClose:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_bottomPanel .xoxv9G_tabBar{padding-right:40px}.xoxv9G_floatWindow{z-index:42;pointer-events:auto;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);box-shadow:var(--dsw-shadow-lv3);contain:layout style;border-radius:8px;flex-direction:column;display:flex;position:absolute;overflow:hidden}.xoxv9G_floatWindowDragging{will-change:left, top, width, height}.xoxv9G_floatHeader{height:34px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l1);cursor:grab;user-select:none;flex:none;align-items:center;gap:4px;padding:0 4px 0 10px;display:flex}.xoxv9G_floatWindowDragging .xoxv9G_floatHeader{cursor:grabbing}.xoxv9G_floatTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.xoxv9G_floatClose{width:18px;height:18px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:4px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.xoxv9G_floatClose:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_floatContent{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden}.xoxv9G_floatResize{z-index:2;cursor:nwse-resize;touch-action:none;width:14px;height:14px;position:absolute;bottom:0;right:0}.xoxv9G_floatResize:hover{background:var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_pane[data-dsh-float-dock-over]{outline:2px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-2px}.xoxv9G_floatDropHint{z-index:46;pointer-events:none;border:2px dashed var(--dsw-alias-interactive-bg-hover-accent);background:color-mix(in srgb, var(--dsw-alias-interactive-bg-hover-accent) 12%, transparent);border-radius:8px;justify-content:center;align-items:center;display:flex;position:absolute}.xoxv9G_floatDropHintLabel{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:4px 12px}.xoxv9G_toggleCluster,.xoxv9G_toggleButton,.xoxv9G_tabBar,.xoxv9G_floatHeader{-webkit-app-region:no-drag}body[data-dsh-title-bar-compat] .xoxv9G_toggleCluster{top:calc(var(--dsh-title-bar-strip,40px) + 3px)}body[data-dsh-title-bar-compat] .xoxv9G_panel{padding-top:var(--dsh-title-bar-strip,40px)}.xoxv9G_cornerHandle{left:-6px;bottom:calc(var(--dsh-sidebar-height,0px) + 6px);z-index:2;cursor:nwse-resize;touch-action:none;width:12px;height:12px;position:absolute}.xoxv9G_cornerHandle:hover,.xoxv9G_cornerHandle[data-dragging]{background:var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_iconButton{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.xoxv9G_iconButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_iconButton:disabled{opacity:.4;cursor:default}.xoxv9G_workbench,.xoxv9G_split{flex:1;min-width:0;min-height:0;display:flex}.xoxv9G_splitRow{flex-direction:row}.xoxv9G_splitCol{flex-direction:column}.xoxv9G_splitChild{display:flex;position:relative;overflow:hidden}.xoxv9G_divider{z-index:3;touch-action:none;flex:none;position:relative}.xoxv9G_dividerRow:after,.xoxv9G_dividerCol:after{content:\"\";background:var(--dsw-alias-border-l2);transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out);position:absolute}.xoxv9G_dividerRow{cursor:col-resize;width:7px;margin:0 -2px}.xoxv9G_dividerRow:after{width:1px;top:0;bottom:0;left:50%;transform:translate(-50%)}.xoxv9G_dividerCol{cursor:row-resize;height:7px;margin:-2px 0}.xoxv9G_dividerCol:after{height:1px;top:50%;left:0;right:0;transform:translateY(-50%)}.xoxv9G_divider:hover:after,.xoxv9G_dividerActive:after{background:var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_pane{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;position:relative}.xoxv9G_paneDrop{outline:1px solid var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.xoxv9G_dropOverlay{z-index:6;pointer-events:none;background:var(--dsw-alias-interactive-bg-hover-accent);opacity:.5;position:absolute}.xoxv9G_dropLeft{width:25%;top:0;bottom:0;left:0}.xoxv9G_dropRight{width:25%;top:0;bottom:0;right:0}.xoxv9G_dropUp{height:25%;top:0;left:0;right:0}.xoxv9G_dropDown{height:25%;bottom:0;left:0;right:0}.xoxv9G_dropCenter{outline:2px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-2px;background:0 0;inset:25%}.xoxv9G_paneContent{flex-direction:column;flex:1;min-height:0;display:flex;overflow:hidden}.xoxv9G_paneTab{flex-direction:column;flex:1;min-height:0;display:flex}.xoxv9G_paneTabHidden{display:none}.xoxv9G_paneEmptyCards{flex:1;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));align-content:start;gap:8px;min-height:0;padding:12px;display:grid;overflow:hidden}.xoxv9G_paneCard{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;text-align:center;border-radius:8px;flex-direction:column;justify-content:center;align-items:center;gap:6px;padding:12px 8px;display:flex}.xoxv9G_paneCard:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}.xoxv9G_paneCard:disabled{opacity:.45;cursor:default}.xoxv9G_tabBar{border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);flex:none;align-items:stretch;height:34px;display:flex}.xoxv9G_tabBarDrop{outline:1px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.xoxv9G_tabList{scrollbar-width:none;flex:1;min-width:0;display:flex;overflow-x:auto}.xoxv9G_tabList::-webkit-scrollbar{display:none}.xoxv9G_tab{min-width:64px;max-width:160px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);border-right:1px solid var(--dsw-alias-border-l1);cursor:pointer;user-select:none;background:0 0;flex:none;align-items:center;gap:4px;padding:0 4px 0 10px;display:flex}.xoxv9G_tab:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_tabActive{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active)}.xoxv9G_tabTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.xoxv9G_tabBadge{min-width:16px;height:15px;font:var(--dsw-font-xxxs-strong-11);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-brand-primary);border-radius:8px;flex:none;justify-content:center;align-items:center;padding:0 4px;display:inline-flex}.xoxv9G_tabClose{width:18px;height:18px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:4px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.xoxv9G_tabClose:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_tabBarPlus{background:var(--dsw-alias-bg-layer-1);width:22px;height:22px;color:var(--dsw-alias-label-tertiary);cursor:pointer;border:none;border-radius:5px;flex:none;justify-content:center;align-self:center;align-items:center;margin:0 6px;padding:0;display:inline-flex;position:sticky;right:0}.xoxv9G_tabBarPlus:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_explorer{flex-direction:column;flex:1;min-height:0;display:flex}.xoxv9G_explorerHeader{flex:none;justify-content:space-between;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.xoxv9G_explorerRoot{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.xoxv9G_explorerBody{flex:1;min-height:0;padding:4px 8px 8px;overflow:hidden auto}.xoxv9G_explorerRow{box-sizing:border-box;width:100%;max-width:100%;height:34px;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;white-space:nowrap;animation:xoxv9G_dsh-row-in .15s var(--ds-ease-in-out);background:0 0;border:none;border-radius:8px;align-items:center;gap:6px;padding:0 8px;display:flex}.xoxv9G_explorerRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_explorerRowRevealed{background:color-mix(in srgb, var(--dsw-alias-interactive-bg-hover-accent) 18%, transparent);box-shadow:inset 2px 0 0 var(--dsw-alias-interactive-bg-hover-accent)}.xoxv9G_explorerDir{font:var(--dsw-font-s-strong-14)}.xoxv9G_explorerHidden{opacity:.45}.xoxv9G_explorerSymlink{color:var(--dsw-alias-label-tertiary);flex:none}.xoxv9G_explorerBroken .xoxv9G_explorerName{color:var(--dsw-alias-state-error-primary)}.xoxv9G_explorerName{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.xoxv9G_explorerRef{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);height:20px;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;border-radius:999px;flex:none;align-items:center;padding:0 8px;display:none}.xoxv9G_explorerRef:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_explorerRow:hover .xoxv9G_explorerRef,.xoxv9G_explorerRow:focus-within .xoxv9G_explorerRef{display:inline-flex}.xoxv9G_explorerCopied{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.xoxv9G_explorerError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);cursor:default}@keyframes xoxv9G_dsh-row-in{0%{opacity:0}}.xoxv9G_explorerEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;padding:16px}.xoxv9G_explorerRowDropTarget{background:var(--dsw-alias-interactive-bg-hover);outline:1px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.xoxv9G_uploadDropZone{z-index:1001;pointer-events:none;border:2px dashed var(--dsw-alias-interactive-bg-hover-accent);box-shadow:0 0 0 200vmax var(--dsw-alias-bg-mask-drop);animation:xoxv9G_dsh-row-in .15s var(--ds-ease-in-out);border-radius:10px;justify-content:center;align-items:flex-start;padding:12px;display:flex;position:fixed}.xoxv9G_uploadDropHero{flex-direction:column;align-items:center;gap:10px;max-width:100%;padding-top:8px;display:flex}.xoxv9G_uploadDropZonePill{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);max-width:100%;box-shadow:var(--dsw-shadow-lv2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);border-radius:999px;align-items:center;gap:6px;padding:6px 12px;display:flex}.xoxv9G_uploadDropZoneText{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.xoxv9G_uploadDropChatHint{z-index:1002;pointer-events:none;animation:xoxv9G_dsh-row-in .15s var(--ds-ease-in-out);justify-content:center;align-items:center;padding:24px;display:flex;position:fixed;top:0;bottom:0;left:0}.xoxv9G_uploadDropChatCard{text-align:center;max-width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-s-strong-14);flex-direction:column;align-items:center;gap:12px;display:flex}.xoxv9G_uploadOverlay{z-index:30;background:var(--dsw-alias-bg-mask-1);backdrop-filter:var(--dsw-mask-blur);animation:xoxv9G_dsh-row-in .15s var(--ds-ease-in-out);justify-content:center;align-items:center;display:flex;position:absolute;inset:0}.xoxv9G_uploadOverlayCard{border:1px solid var(--dsw-alias-border-inverted);background:var(--dsw-alias-bg-layer-2);min-width:280px;max-width:min(420px,100% - 48px);box-shadow:var(--dsw-shadow-lv3);border-radius:24px;flex-direction:column;gap:12px;padding:20px 24px;display:flex}.xoxv9G_uploadOverlayTitle{font:var(--dsw-font-s-strong-14);color:var(--dsw-alias-label-primary);align-items:center;gap:8px;display:flex}.xoxv9G_uploadOverlayTitle>svg{flex:none}.xoxv9G_uploadOverlayTitle>span{white-space:nowrap;text-overflow:ellipsis;min-width:0;overflow:hidden}.xoxv9G_uploadOverlayProgress{background:var(--dsw-alias-border-l2);border-radius:3px;height:6px;overflow:hidden}.xoxv9G_uploadOverlayProgressFill{background:var(--dsw-alias-interactive-bg-hover-accent);height:100%;transition:width .15s var(--ds-ease-in-out);border-radius:3px}.xoxv9G_uploadOverlayStatus{min-height:1em;font:var(--dsw-font-xxs-12);font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.xoxv9G_uploadOverlayCancel{border:1px solid var(--dsw-alias-border-l2);height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;background:0 0;border-radius:8px;align-self:flex-end;padding:0 14px}.xoxv9G_uploadOverlayCancel:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}.xoxv9G_uploadOverlayCancel:disabled{opacity:.4;cursor:default}.xoxv9G_editor{flex-direction:column;flex:1;min-height:0;display:flex}.xoxv9G_editorHeader{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:6px;padding:6px 8px;display:flex}.xoxv9G_editorTitle{min-width:0;font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.xoxv9G_editorPathInput{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.xoxv9G_editorPathInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.xoxv9G_editorTreeToggleActive{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active)}.xoxv9G_editorBody{flex:1;min-height:0;display:flex}.xoxv9G_editorMain{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex}.xoxv9G_editorTreeDock{border-left:1px solid var(--dsw-alias-border-l1);flex:none;min-height:0;display:flex;position:relative}.xoxv9G_editorTreeResize{cursor:col-resize;touch-action:none;z-index:3;width:6px;position:absolute;top:0;bottom:0;left:0}.xoxv9G_editorTreeResize:hover{background:var(--dsw-alias-border-l2)}.xoxv9G_editorTreePanel{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;position:relative}.xoxv9G_editorTreePanelFull{flex:1}.xoxv9G_editorTreeSearch{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:6px;padding:6px 8px;display:flex}.xoxv9G_editorSearchInput{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:26px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.xoxv9G_editorSearchInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.xoxv9G_editorSearchHint{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);padding:8px 12px}.xoxv9G_editorSearchResult{width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);text-align:left;cursor:pointer;text-overflow:ellipsis;white-space:nowrap;background:0 0;border:none;border-radius:6px;padding:4px 8px;display:block;overflow:hidden}.xoxv9G_editorSearchResult:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_editorStatus{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}.xoxv9G_editorStatusError{color:var(--dsw-alias-state-error-primary)}.xoxv9G_dirtyDot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;flex:none;width:7px;height:7px}.xoxv9G_editorPlaceholder{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;flex:1;justify-content:center;align-items:center;padding:16px;display:flex}.xoxv9G_orphanedType{opacity:.7;overflow-wrap:anywhere;margin-top:8px;font-size:12px;display:block}.xoxv9G_editorBinary{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:12px;padding:24px 16px;display:flex}.xoxv9G_editorBinaryNotice{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.xoxv9G_editorDownloadLink{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out), border-color var(--ds-transition-duration-slow) var(--ds-ease-in-out);border-radius:6px;align-items:center;gap:6px;padding:6px 14px;text-decoration:none;display:inline-flex}.xoxv9G_editorDownloadLink:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}.xoxv9G_editorError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);padding:12px 16px}.xoxv9G_editorBanner{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex:none;padding:4px 8px}.xoxv9G_sandboxStatus{font:var(--dsw-font-xxxs-11);flex:none;align-items:center;gap:8px;padding:4px 10px;display:flex}.xoxv9G_sandboxStatusOn{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l1)}.xoxv9G_sandboxStatusOff{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-bottom:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent)}.xoxv9G_sandboxDot{background:var(--dsw-alias-state-success-primary);border-radius:50%;flex:none;width:6px;height:6px}.xoxv9G_sandboxStatusOff .xoxv9G_sandboxDot{background:var(--dsw-alias-state-error-primary)}.xoxv9G_sandboxStatusText{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.xoxv9G_sandboxAction{border:1px solid var(--dsw-alias-border-l2);font:inherit;color:inherit;cursor:pointer;background:0 0;border-radius:6px;flex:none;padding:2px 8px}.xoxv9G_sandboxAction:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_editorHtml{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.xoxv9G_browser{flex-direction:column;flex:1;min-height:0;display:flex}.xoxv9G_browserBar{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:4px;padding:6px 8px;display:flex}.xoxv9G_browserInput{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.xoxv9G_browserInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.xoxv9G_browserMessage{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex:none;padding:4px 12px}.xoxv9G_browserFrame{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.xoxv9G_browserStart{text-align:center;min-height:0;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary);flex:1;justify-content:center;align-items:center;padding:20px;display:flex}.xoxv9G_browserBlocked{text-align:center;min-height:0;color:var(--dsw-alias-state-warn-primary);flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;padding:24px;display:flex}.xoxv9G_browserBlockedTitle{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary)}.xoxv9G_browserBlockedDesc{max-width:280px;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-secondary)}.xoxv9G_browserBlockedActions{gap:8px;margin-top:6px;display:flex}.xoxv9G_browserBlockedButton{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxxs-11);cursor:pointer;border-radius:6px;padding:4px 12px}.xoxv9G_browserBlockedButton:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_editorCm{background:0 0;flex:1;min-height:0;overflow:hidden}.xoxv9G_editorCmHidden{display:none}.xoxv9G_editorCm .cm-editor{height:100%}.xoxv9G_editorCm .cm-scroller{padding:12px 16px}.xoxv9G_editorCm .cm-editor.cm-focused{outline:none}.xoxv9G_editorModeToggle{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:6px;flex:none;align-items:center;gap:2px;padding:2px;display:inline-flex}.xoxv9G_editorModeButton{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);cursor:pointer;background:0 0;border:none;border-radius:4px;padding:2px 8px}.xoxv9G_editorModeButton:hover{color:var(--dsw-alias-label-primary)}.xoxv9G_editorModeActive{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.xoxv9G_editorImageWrap{flex:1;justify-content:center;align-items:center;min-height:0;padding:12px;display:flex;overflow:auto}.xoxv9G_editorImage{object-fit:contain;max-width:100%;max-height:100%}.xoxv9G_editorMd{min-height:0;font:var(--dsw-font-xs-13);flex:1;padding:12px 16px;overflow-y:auto}.xoxv9G_mermaidWrap{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:6px;margin:6px 0;overflow:hidden}.xoxv9G_mermaidHeader{border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);justify-content:space-between;align-items:center;gap:6px;padding:4px 8px;display:flex}.xoxv9G_mermaidInfo{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary)}.xoxv9G_mermaidCopy{height:20px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-11);cursor:pointer;background:0 0;border:none;border-radius:4px;align-items:center;gap:4px;padding:0 6px;display:inline-flex}.xoxv9G_mermaidCopy:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_mermaidBody{cursor:zoom-in;justify-content:center;padding:10px;display:flex;overflow:auto}.xoxv9G_mermaidBody svg{max-width:100%;height:auto}.xoxv9G_mermaidError{border-bottom:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-state-error-primary);font:var(--dsw-font-xxxs-11);padding:6px 10px}.xoxv9G_mermaidCode{font:var(--dsw-font-xxxs-11);margin:0;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:auto}.xoxv9G_mermaidMarkdown .md-code-block[data-mermaid-processed]{display:contents}.xoxv9G_mermaidModal{z-index:1000;background:var(--dsw-alias-bg-mask-1);backdrop-filter:blur(2px);flex-direction:column;justify-content:center;align-items:center;display:flex;position:fixed;inset:0}.xoxv9G_mermaidModalToolbar{z-index:10;gap:8px;display:flex;position:absolute;top:16px;right:16px}.xoxv9G_mermaidModalButton{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);width:36px;height:36px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xs-strong-13);cursor:pointer;border-radius:8px;justify-content:center;align-items:center;display:inline-flex}.xoxv9G_mermaidModalButton:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_mermaidModalStage{justify-content:center;align-items:center;width:90vw;height:80vh;display:flex;position:relative;overflow:hidden}.xoxv9G_mermaidModalStage svg{cursor:grab;transform-origin:50%;user-select:none;-webkit-user-drag:none;background:var(--dsw-alias-bg-layer-1);border-radius:12px;max-width:none;max-height:none;padding:16px}.xoxv9G_mermaidModalStage svg:active{cursor:grabbing}.xoxv9G_mermaidModalHint{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);pointer-events:none;position:absolute;bottom:16px;left:50%;transform:translate(-50%)}.xoxv9G_selectionPopup{z-index:60;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxxs-strong-11);white-space:nowrap;cursor:pointer;border-radius:6px;align-items:center;padding:0 10px;display:inline-flex;position:fixed;transform:translate(-50%,calc(-100% - 8px))}.xoxv9G_selectionPopup:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_editorPdf{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-height:0;display:flex}.xoxv9G_editorPdfToolbar{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;justify-content:flex-end;padding:6px 8px;display:flex}.xoxv9G_editorPdfStage{flex:1;min-height:0;display:flex;position:relative}.xoxv9G_editorPdfFrame{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.xoxv9G_editorPdfFrameBlocked{pointer-events:none}.xoxv9G_editorPdfDragShield{z-index:4;pointer-events:none;background:0 0;position:absolute;inset:0}.xoxv9G_editorPdfDragShieldActive{pointer-events:auto}body[data-dsh-tab-dragging] .xoxv9G_editorPdfFrame{pointer-events:none!important}body[data-dsh-tab-dragging] .xoxv9G_editorPdfDragShield{pointer-events:auto!important}.xoxv9G_terminalWrap{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-height:0;display:flex;position:relative}.xoxv9G_terminal{flex:1;min-height:0;padding:6px 4px 6px 8px}.xoxv9G_terminal .xterm{height:100%}.xoxv9G_terminalBanner{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex-wrap:wrap;flex:none;align-items:center;gap:8px;padding:3px 10px;display:flex}.xoxv9G_terminalBannerUrl{word-break:break-all;opacity:.85;flex-basis:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.xoxv9G_boundaryError{z-index:50;background:var(--dsw-alias-bg-layer-1);border-left:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);flex-direction:column;align-items:flex-start;gap:8px;padding:16px;display:flex;position:fixed;top:0;bottom:0;right:0;overflow:auto}.xoxv9G_terminalRetry{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;border-radius:999px;flex:none;padding:1px 8px}.xoxv9G_terminalRetry:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_terminalDepsBanner{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex-direction:column;flex:none;gap:6px;padding:10px;display:flex}.xoxv9G_terminalDepsTitle{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-state-warn-primary)}.xoxv9G_terminalDepsHint{opacity:.9}.xoxv9G_terminalDepsCommandRow{align-items:flex-start;gap:8px;display:flex}.xoxv9G_terminalRepairCommand{white-space:pre-wrap;word-break:break-all;user-select:text;min-width:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:4px;flex:1;max-height:160px;margin:0;padding:6px 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;overflow:auto}.xoxv9G_terminalDepsNote{opacity:.85}.xoxv9G_terminalDepsActions{align-items:center;gap:8px;display:flex}.xoxv9G_tabBoundaryError{min-height:0;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);flex-direction:column;flex:1;align-items:flex-start;gap:8px;padding:12px 16px;display:flex;overflow:auto}.xoxv9G_git{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden auto}.xoxv9G_gitHeader{flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.xoxv9G_gitWorktreeRow{flex:none;align-items:center;gap:8px;padding:6px 8px 0 12px;display:flex}.xoxv9G_gitWorktreeLabel{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);flex:none}.xoxv9G_gitBranchSelect{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);min-width:0;height:26px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 6px}.xoxv9G_gitSection{border-top:1px solid var(--dsw-alias-border-l1)}.xoxv9G_gitSectionHeader{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary);text-transform:uppercase;justify-content:space-between;align-items:center;padding:6px 12px 4px;display:flex}.xoxv9G_gitLink{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-brand-primary);cursor:pointer;background:0 0;border:none;padding:0}.xoxv9G_gitLink:hover:not(:disabled){text-decoration:underline}.xoxv9G_gitLink:disabled{opacity:.4;cursor:default}.xoxv9G_gitRow{min-height:34px;animation:xoxv9G_dsh-row-in .15s var(--ds-ease-in-out);border-radius:8px;align-items:center;gap:6px;margin:0 6px;padding:0 8px;display:flex}.xoxv9G_gitRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_gitRowSelected{background:var(--dsw-alias-interactive-bg-active)}.xoxv9G_gitRowMain{cursor:pointer;text-align:left;background:0 0;border:none;flex:1;align-items:center;gap:8px;min-width:0;padding:3px 0;display:flex}.xoxv9G_gitBadge{width:20px;height:16px;font:var(--dsw-font-xxxs-strong-11);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);border-radius:4px;flex:none;justify-content:center;align-items:center;display:inline-flex}.xoxv9G_gitName{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.xoxv9G_gitEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);padding:4px 12px 8px}.xoxv9G_gitPlaceholder{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;padding:16px}.xoxv9G_gitError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;padding:8px 12px}.xoxv9G_gitDiff{border-top:1px solid var(--dsw-alias-border-l1);padding:8px}.xoxv9G_gitDiffTab{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden auto}.xoxv9G_gitDiffTabHeader{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.xoxv9G_gitDiffTabTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.xoxv9G_gitDiffFile{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;align-items:baseline;gap:6px;padding:8px 2px 2px;display:flex}.xoxv9G_gitDiffFile:disabled{cursor:default}.xoxv9G_gitDiffFile:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_gitDiffFileChevron{color:var(--dsw-alias-label-tertiary);flex:none;transform:rotate(0)}.xoxv9G_gitDiffFileChevronExpanded{transform:rotate(90deg)}.xoxv9G_gitDiffFilePath{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.xoxv9G_gitDiffFileOld{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:40%;overflow:hidden}.xoxv9G_gitDiffFileTag{border:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:0 6px}.xoxv9G_gitDiffHunk{font:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-tertiary);gap:8px;padding:3px 2px;display:flex}.xoxv9G_gitDiffHunkHeader{color:var(--dsw-alias-label-secondary);flex:none}.xoxv9G_gitDiffHunkSection{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.xoxv9G_gitDiffLine{font:var(--dsw-font-markdown-code-block-small);white-space:pre-wrap;overflow-wrap:anywhere;align-items:stretch;min-width:0;line-height:20px;display:flex}.xoxv9G_gitDiffNum{text-align:right;width:36px;color:var(--dsw-alias-label-tertiary);user-select:none;flex:none;padding-right:8px}.xoxv9G_gitDiffCode{flex:1;min-width:0;overflow:visible}.xoxv9G_gitDiffCtx{color:var(--dsw-alias-label-primary)}.xoxv9G_gitDiffDel{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)}.xoxv9G_gitDiffAdd{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)}.xoxv9G_gitDiffMeta{padding-left:2px}.xoxv9G_gitDiffMetaText{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);font-style:italic}.xoxv9G_gitDiffExpand{width:100%;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-brand-primary);cursor:pointer;text-align:center;background:0 0;border:none;margin:4px 0;display:block}.xoxv9G_gitDiffExpand:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_gitConfirmDesc{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);white-space:pre-wrap;margin:0}.xoxv9G_gitCommit{border-top:1px solid var(--dsw-alias-border-l1);align-items:center;gap:6px;padding:8px 12px;display:flex}.xoxv9G_gitCommitInput{flex:1;min-width:0}.xoxv9G_gitCommitButton{background:var(--dsw-alias-button-primary-fill);height:26px;color:var(--dsw-alias-label-primary-inverted);font:var(--dsw-font-xxs-strong-12);cursor:pointer;border:none;border-radius:6px;flex:none;padding:0 12px}.xoxv9G_gitCommitButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.xoxv9G_gitCommitButton:disabled{opacity:.45;cursor:default}.xoxv9G_gitLogRow{cursor:pointer;border-radius:8px;flex-direction:column;gap:2px;padding:5px 12px;display:flex}.xoxv9G_gitLogRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.xoxv9G_gitLogLine1{align-items:baseline;gap:8px;min-width:0;display:flex}.xoxv9G_gitLogHash{font:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-tertiary);flex:none}.xoxv9G_gitLogLine2{flex-wrap:wrap;align-items:center;gap:6px;min-width:0;display:flex}.xoxv9G_gitLogRef{border:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-brand-primary);white-space:nowrap;border-radius:999px;flex:none;padding:0 5px}.xoxv9G_gitLogSubject{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.xoxv9G_gitLogMeta{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}.xoxv9G_gitLogMore{border:1px solid var(--dsw-alias-border-l2);width:calc(100% - 24px);font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border-radius:6px;margin:4px 12px 8px;padding:6px 0;display:block}.xoxv9G_gitLogMore:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_gitLogMore:disabled{opacity:.5;cursor:default}.xoxv9G_producedRow{flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;display:flex}.xoxv9G_producedLabel{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.xoxv9G_producedChip{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);max-width:200px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);cursor:pointer;border-radius:999px;align-items:center;gap:4px;padding:2px 8px;display:inline-flex;overflow:hidden}.xoxv9G_producedChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_producedChip span{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.xoxv9G_producedMore{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.xoxv9G_toggleButton:focus-visible,.xoxv9G_bottomClose:focus-visible,.xoxv9G_iconButton:focus-visible,.xoxv9G_tab:focus-visible,.xoxv9G_tabClose:focus-visible,.xoxv9G_tabBarPlus:focus-visible,.xoxv9G_paneCard:focus-visible,.xoxv9G_explorerRow:focus-visible,.xoxv9G_explorerRef:focus-visible,.xoxv9G_gitRowMain:focus-visible,.xoxv9G_gitLink:focus-visible,.xoxv9G_gitCommitButton:focus-visible,.xoxv9G_gitLogRow:focus-visible,.xoxv9G_gitLogMore:focus-visible,.xoxv9G_gitDiffFile:focus-visible,.xoxv9G_gitDiffExpand:focus-visible,.xoxv9G_terminalRetry:focus-visible,.xoxv9G_editorModeButton:focus-visible,.xoxv9G_editorDownloadLink:focus-visible,.xoxv9G_editorPptxButton:focus-visible,.xoxv9G_editorDocxZoomRange:focus-visible{outline:2px solid var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}@media (prefers-reduced-motion:reduce){.xoxv9G_panel,.xoxv9G_panelHidden,.xoxv9G_bottomPanel,.xoxv9G_bottomPanelHidden,.xoxv9G_toggleCluster,.xoxv9G_toggleButton,.xoxv9G_tab,.xoxv9G_tabBarPlus,.xoxv9G_paneCard,.xoxv9G_explorerRow,.xoxv9G_gitRow,.xoxv9G_divider,.xoxv9G_dividerRow:after,.xoxv9G_dividerCol:after{transition:none;animation:none}}@media (width<=767px){.xoxv9G_panel:not(.xoxv9G_panelHidden) .xoxv9G_tabBar{padding-right:40px}.xoxv9G_tab{min-width:48px;max-width:128px}}.xoxv9G_openWithLabel{align-items:center;gap:8px;width:100%;min-width:0;display:flex}.xoxv9G_openWithName{text-overflow:ellipsis;white-space:nowrap;flex:auto;min-width:0;overflow:hidden}.xoxv9G_openWithChevron{color:var(--dsw-alias-label-tertiary);flex:none}.xoxv9G_openWithPin{width:20px;height:20px;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px;flex:none;justify-content:center;align-items:center;display:inline-flex}.xoxv9G_openWithPin:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_openWithPinActive{color:var(--dsw-alias-state-business-primary)}.xoxv9G_editorHtmlBlock{margin:8px 0}.xoxv9G_editorHtmlBlock img,.xoxv9G_editorHtmlBlock video{max-width:100%}.xoxv9G_editorHtmlBlock details{margin:4px 0;padding:4px 0}.xoxv9G_editorHtmlBlock summary{cursor:pointer}.xoxv9G_tocBar{z-index:3;pointer-events:none;justify-content:flex-end;height:0;display:flex;position:sticky;top:0}.xoxv9G_tocButton{pointer-events:auto;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);width:26px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;justify-content:center;align-items:center;margin:4px 2px 0 0;padding:0;display:inline-flex}.xoxv9G_tocButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_tocPanel{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);width:min(300px,82%);max-height:60vh;box-shadow:var(--dsw-shadow-lv2);pointer-events:auto;border-radius:8px;flex-direction:column;padding:4px;display:flex;position:absolute;top:32px;right:2px;overflow-y:auto}.xoxv9G_tocItem{min-width:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:6px;align-items:baseline;gap:8px;padding:4px 8px;display:flex}.xoxv9G_tocItem:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.xoxv9G_tocItem[data-level=\"2\"]{padding-left:18px}.xoxv9G_tocItem[data-level=\"3\"]{padding-left:28px}.xoxv9G_tocItem[data-level=\"4\"]{padding-left:38px}.xoxv9G_tocItem[data-level=\"5\"]{padding-left:48px}.xoxv9G_tocItem[data-level=\"6\"]{padding-left:58px}.xoxv9G_tocItemLevel{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.xoxv9G_tocItemText{text-overflow:ellipsis;white-space:nowrap;flex:auto;min-width:0;overflow:hidden}@keyframes xoxv9G_dsh-toc-flash{0%,60%{background:var(--dsw-alias-interactive-bg-hover)}to{background:0 0}}.xoxv9G_tocFlash{border-radius:4px;animation:1.2s ease-out xoxv9G_dsh-toc-flash}";
+		//#region \0dsh-css:/workspace/1/dsh/packages/dsh-sidebar-lite/src/client/sidebar.module.css.mjs
+		const css$4 = "[data-dsh-panel-host]{z-index:25;pointer-events:none;position:fixed;inset:0;overflow:hidden}[data-dsh-panel-host][data-dsh-panel-host-degraded]{position:absolute;top:0;left:0}.ELo9Rq_toggleCluster{top:calc(11px + env(safe-area-inset-top));z-index:45;pointer-events:auto;flex-direction:row;gap:4px;display:flex;position:absolute;right:12px}.ELo9Rq_panel:not(.ELo9Rq_panelHidden) .ELo9Rq_tabBar{padding-right:72px}.ELo9Rq_toggleButton{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out), color var(--ds-transition-duration-slow) var(--ds-ease-in-out);background:0 0;border:none;border-radius:50%;justify-content:center;align-items:center;display:flex}.ELo9Rq_toggleButton:hover:not(:disabled):not([aria-disabled=true]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_toggleButton:disabled,.ELo9Rq_toggleButton[aria-disabled=true]{opacity:.4;cursor:default}.ELo9Rq_panel{box-sizing:border-box;z-index:40;pointer-events:auto;background:var(--dsw-alias-bg-layer-1);border-left:1px solid var(--dsw-alias-border-l2);padding-bottom:env(safe-area-inset-bottom);transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out);flex-direction:column;display:flex;position:absolute;top:0;bottom:0;right:0}.ELo9Rq_panelHidden{pointer-events:none;visibility:hidden;transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out), visibility 0s linear var(--ds-transition-duration-slow);transform:translate(102%)}.ELo9Rq_panel[data-dragging]{transition:none}.ELo9Rq_panelResize{cursor:col-resize;z-index:2;touch-action:none;width:8px;position:absolute;top:0;bottom:0;left:-4px}.ELo9Rq_panelResizeActive{background:var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_panelBody{flex:1;min-width:0;min-height:0;display:flex}.ELo9Rq_bottomPanel{z-index:40;background:var(--dsw-alias-bg-layer-1);border-top:1px solid var(--dsw-alias-border-l2);pointer-events:auto;padding-bottom:env(safe-area-inset-bottom);transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), height var(--ds-transition-duration-slow) var(--ds-ease-in-out);flex-direction:column;display:flex;position:absolute;bottom:0}.ELo9Rq_bottomPanelHidden{pointer-events:none;visibility:hidden;transition:transform var(--ds-transition-duration-slow) var(--ds-ease-in-out), height var(--ds-transition-duration-slow) var(--ds-ease-in-out), visibility 0s linear var(--ds-transition-duration-slow);transform:translateY(102%)}.ELo9Rq_bottomPanel[data-dragging]{transition:none}.ELo9Rq_panel,.ELo9Rq_bottomPanel{contain:layout style}body[data-dsh-sidebar-dragging] .ELo9Rq_panel,body[data-dsh-sidebar-dragging] .ELo9Rq_bottomPanel{will-change:transform}.ELo9Rq_bottomResize{cursor:row-resize;z-index:2;touch-action:none;height:8px;position:absolute;top:-4px;left:0;right:0}.ELo9Rq_bottomResizeActive{background:var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_bottomClose{z-index:4;width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex;position:absolute;top:3px;right:6px}.ELo9Rq_bottomClose:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_bottomPanel .ELo9Rq_tabBar{padding-right:40px}.ELo9Rq_floatWindow{z-index:42;pointer-events:auto;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);box-shadow:var(--dsw-shadow-lv3);contain:layout style;border-radius:8px;flex-direction:column;display:flex;position:absolute;overflow:hidden}.ELo9Rq_floatWindowDragging{will-change:left, top, width, height}.ELo9Rq_floatHeader{height:34px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l1);cursor:grab;user-select:none;flex:none;align-items:center;gap:4px;padding:0 4px 0 10px;display:flex}.ELo9Rq_floatWindowDragging .ELo9Rq_floatHeader{cursor:grabbing}.ELo9Rq_floatTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.ELo9Rq_floatClose{width:18px;height:18px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:4px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.ELo9Rq_floatClose:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_floatContent{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden}.ELo9Rq_floatResize{z-index:2;cursor:nwse-resize;touch-action:none;width:14px;height:14px;position:absolute;bottom:0;right:0}.ELo9Rq_floatResize:hover{background:var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_pane[data-dsh-float-dock-over]{outline:2px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-2px}.ELo9Rq_floatDropHint{z-index:46;pointer-events:none;border:2px dashed var(--dsw-alias-interactive-bg-hover-accent);background:color-mix(in srgb, var(--dsw-alias-interactive-bg-hover-accent) 12%, transparent);border-radius:8px;justify-content:center;align-items:center;display:flex;position:absolute}.ELo9Rq_floatDropHintLabel{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:4px 12px}.ELo9Rq_toggleCluster,.ELo9Rq_toggleButton,.ELo9Rq_tabBar,.ELo9Rq_floatHeader{-webkit-app-region:no-drag}body[data-dsh-title-bar-compat] .ELo9Rq_toggleCluster{top:calc(var(--dsh-title-bar-strip,40px) + 3px)}body[data-dsh-title-bar-compat] .ELo9Rq_panel{padding-top:var(--dsh-title-bar-strip,40px)}.ELo9Rq_cornerHandle{left:-6px;bottom:calc(var(--dsh-sidebar-height,0px) + 6px);z-index:2;cursor:nwse-resize;touch-action:none;width:12px;height:12px;position:absolute}.ELo9Rq_cornerHandle:hover,.ELo9Rq_cornerHandle[data-dragging]{background:var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_iconButton{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.ELo9Rq_iconButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_iconButton:disabled{opacity:.4;cursor:default}.ELo9Rq_workbench,.ELo9Rq_split{flex:1;min-width:0;min-height:0;display:flex}.ELo9Rq_splitRow{flex-direction:row}.ELo9Rq_splitCol{flex-direction:column}.ELo9Rq_splitChild{display:flex;position:relative;overflow:hidden}.ELo9Rq_divider{z-index:3;touch-action:none;flex:none;position:relative}.ELo9Rq_dividerRow:after,.ELo9Rq_dividerCol:after{content:\"\";background:var(--dsw-alias-border-l2);transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out);position:absolute}.ELo9Rq_dividerRow{cursor:col-resize;width:7px;margin:0 -2px}.ELo9Rq_dividerRow:after{width:1px;top:0;bottom:0;left:50%;transform:translate(-50%)}.ELo9Rq_dividerCol{cursor:row-resize;height:7px;margin:-2px 0}.ELo9Rq_dividerCol:after{height:1px;top:50%;left:0;right:0;transform:translateY(-50%)}.ELo9Rq_divider:hover:after,.ELo9Rq_dividerActive:after{background:var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_pane{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;position:relative}.ELo9Rq_paneDrop{outline:1px solid var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.ELo9Rq_dropOverlay{z-index:6;pointer-events:none;background:var(--dsw-alias-interactive-bg-hover-accent);opacity:.5;position:absolute}.ELo9Rq_dropLeft{width:25%;top:0;bottom:0;left:0}.ELo9Rq_dropRight{width:25%;top:0;bottom:0;right:0}.ELo9Rq_dropUp{height:25%;top:0;left:0;right:0}.ELo9Rq_dropDown{height:25%;bottom:0;left:0;right:0}.ELo9Rq_dropCenter{outline:2px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-2px;background:0 0;inset:25%}.ELo9Rq_paneContent{flex-direction:column;flex:1;min-height:0;display:flex;overflow:hidden}.ELo9Rq_paneTab{flex-direction:column;flex:1;min-height:0;display:flex}.ELo9Rq_paneTabHidden{display:none}.ELo9Rq_paneEmptyCards{flex:1;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));align-content:start;gap:8px;min-height:0;padding:12px;display:grid;overflow:hidden}.ELo9Rq_paneCard{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;text-align:center;border-radius:8px;flex-direction:column;justify-content:center;align-items:center;gap:6px;padding:12px 8px;display:flex}.ELo9Rq_paneCard:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}.ELo9Rq_paneCard:disabled{opacity:.45;cursor:default}.ELo9Rq_tabBar{border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);flex:none;align-items:stretch;height:34px;display:flex}.ELo9Rq_tabBarDrop{outline:1px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.ELo9Rq_tabList{scrollbar-width:none;flex:1;min-width:0;display:flex;overflow-x:auto}.ELo9Rq_tabList::-webkit-scrollbar{display:none}.ELo9Rq_tab{min-width:64px;max-width:160px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);border-right:1px solid var(--dsw-alias-border-l1);cursor:pointer;user-select:none;background:0 0;flex:none;align-items:center;gap:4px;padding:0 4px 0 10px;display:flex}.ELo9Rq_tab:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_tabActive{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active)}.ELo9Rq_tabTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.ELo9Rq_tabBadge{min-width:16px;height:15px;font:var(--dsw-font-xxxs-strong-11);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-brand-primary);border-radius:8px;flex:none;justify-content:center;align-items:center;padding:0 4px;display:inline-flex}.ELo9Rq_tabClose{width:18px;height:18px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:4px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}.ELo9Rq_tabClose:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_tabBarPlus{background:var(--dsw-alias-bg-layer-1);width:22px;height:22px;color:var(--dsw-alias-label-tertiary);cursor:pointer;border:none;border-radius:5px;flex:none;justify-content:center;align-self:center;align-items:center;margin:0 6px;padding:0;display:inline-flex;position:sticky;right:0}.ELo9Rq_tabBarPlus:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_explorer{flex-direction:column;flex:1;min-height:0;display:flex}.ELo9Rq_explorerHeader{flex:none;justify-content:space-between;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.ELo9Rq_explorerRoot{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.ELo9Rq_explorerBody{flex:1;min-height:0;padding:4px 8px 8px;overflow:hidden auto}.ELo9Rq_explorerRow{box-sizing:border-box;width:100%;max-width:100%;height:34px;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;white-space:nowrap;animation:ELo9Rq_dsh-row-in .15s var(--ds-ease-in-out);background:0 0;border:none;border-radius:8px;align-items:center;gap:6px;padding:0 8px;display:flex}.ELo9Rq_explorerRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_explorerRowRevealed{background:color-mix(in srgb, var(--dsw-alias-interactive-bg-hover-accent) 18%, transparent);box-shadow:inset 2px 0 0 var(--dsw-alias-interactive-bg-hover-accent)}.ELo9Rq_explorerDir{font:var(--dsw-font-s-strong-14)}.ELo9Rq_explorerHidden{opacity:.45}.ELo9Rq_explorerSymlink{color:var(--dsw-alias-label-tertiary);flex:none}.ELo9Rq_explorerBroken .ELo9Rq_explorerName{color:var(--dsw-alias-state-error-primary)}.ELo9Rq_explorerName{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.ELo9Rq_explorerRef{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);height:20px;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;border-radius:999px;flex:none;align-items:center;padding:0 8px;display:none}.ELo9Rq_explorerRef:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_explorerRow:hover .ELo9Rq_explorerRef,.ELo9Rq_explorerRow:focus-within .ELo9Rq_explorerRef{display:inline-flex}.ELo9Rq_explorerCopied{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.ELo9Rq_explorerError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);cursor:default}@keyframes ELo9Rq_dsh-row-in{0%{opacity:0}}.ELo9Rq_explorerEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;padding:16px}.ELo9Rq_explorerRowDropTarget{background:var(--dsw-alias-interactive-bg-hover);outline:1px dashed var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}.ELo9Rq_uploadDropZone{z-index:1001;pointer-events:none;border:2px dashed var(--dsw-alias-interactive-bg-hover-accent);box-shadow:0 0 0 200vmax var(--dsw-alias-bg-mask-drop);animation:ELo9Rq_dsh-row-in .15s var(--ds-ease-in-out);border-radius:10px;justify-content:center;align-items:flex-start;padding:12px;display:flex;position:fixed}.ELo9Rq_uploadDropHero{flex-direction:column;align-items:center;gap:10px;max-width:100%;padding-top:8px;display:flex}.ELo9Rq_uploadDropZonePill{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);max-width:100%;box-shadow:var(--dsw-shadow-lv2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);border-radius:999px;align-items:center;gap:6px;padding:6px 12px;display:flex}.ELo9Rq_uploadDropZoneText{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.ELo9Rq_uploadDropChatHint{z-index:1002;pointer-events:none;animation:ELo9Rq_dsh-row-in .15s var(--ds-ease-in-out);justify-content:center;align-items:center;padding:24px;display:flex;position:fixed;top:0;bottom:0;left:0}.ELo9Rq_uploadDropChatCard{text-align:center;max-width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-s-strong-14);flex-direction:column;align-items:center;gap:12px;display:flex}.ELo9Rq_uploadOverlay{z-index:30;background:var(--dsw-alias-bg-mask-1);backdrop-filter:var(--dsw-mask-blur);animation:ELo9Rq_dsh-row-in .15s var(--ds-ease-in-out);justify-content:center;align-items:center;display:flex;position:absolute;inset:0}.ELo9Rq_uploadOverlayCard{border:1px solid var(--dsw-alias-border-inverted);background:var(--dsw-alias-bg-layer-2);min-width:280px;max-width:min(420px,100% - 48px);box-shadow:var(--dsw-shadow-lv3);border-radius:24px;flex-direction:column;gap:12px;padding:20px 24px;display:flex}.ELo9Rq_uploadOverlayTitle{font:var(--dsw-font-s-strong-14);color:var(--dsw-alias-label-primary);align-items:center;gap:8px;display:flex}.ELo9Rq_uploadOverlayTitle>svg{flex:none}.ELo9Rq_uploadOverlayTitle>span{white-space:nowrap;text-overflow:ellipsis;min-width:0;overflow:hidden}.ELo9Rq_uploadOverlayProgress{background:var(--dsw-alias-border-l2);border-radius:3px;height:6px;overflow:hidden}.ELo9Rq_uploadOverlayProgressFill{background:var(--dsw-alias-interactive-bg-hover-accent);height:100%;transition:width .15s var(--ds-ease-in-out);border-radius:3px}.ELo9Rq_uploadOverlayStatus{min-height:1em;font:var(--dsw-font-xxs-12);font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.ELo9Rq_uploadOverlayCancel{border:1px solid var(--dsw-alias-border-l2);height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;background:0 0;border-radius:8px;align-self:flex-end;padding:0 14px}.ELo9Rq_uploadOverlayCancel:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}.ELo9Rq_uploadOverlayCancel:disabled{opacity:.4;cursor:default}.ELo9Rq_editor{flex-direction:column;flex:1;min-height:0;display:flex}.ELo9Rq_editorHeader{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:6px;padding:6px 8px;display:flex}.ELo9Rq_editorTitle{min-width:0;font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.ELo9Rq_editorPathInput{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.ELo9Rq_editorPathInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.ELo9Rq_editorTreeToggleActive{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active)}.ELo9Rq_editorBody{flex:1;min-height:0;display:flex}.ELo9Rq_editorMain{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex}.ELo9Rq_editorTreeDock{border-left:1px solid var(--dsw-alias-border-l1);flex:none;min-height:0;display:flex;position:relative}.ELo9Rq_editorTreeResize{cursor:col-resize;touch-action:none;z-index:3;width:6px;position:absolute;top:0;bottom:0;left:0}.ELo9Rq_editorTreeResize:hover{background:var(--dsw-alias-border-l2)}.ELo9Rq_editorTreePanel{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;position:relative}.ELo9Rq_editorTreePanelFull{flex:1}.ELo9Rq_editorTreeSearch{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:6px;padding:6px 8px;display:flex}.ELo9Rq_editorSearchInput{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:26px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.ELo9Rq_editorSearchInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.ELo9Rq_editorSearchHint{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);padding:8px 12px}.ELo9Rq_editorSearchResult{width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);text-align:left;cursor:pointer;text-overflow:ellipsis;white-space:nowrap;background:0 0;border:none;border-radius:6px;padding:4px 8px;display:block;overflow:hidden}.ELo9Rq_editorSearchResult:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_editorStatus{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_editorStatusError{color:var(--dsw-alias-state-error-primary)}.ELo9Rq_dirtyDot{background:var(--dsw-alias-state-warn-primary);border-radius:50%;flex:none;width:7px;height:7px}.ELo9Rq_editorPlaceholder{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;flex:1;justify-content:center;align-items:center;padding:16px;display:flex}.ELo9Rq_orphanedType{opacity:.7;overflow-wrap:anywhere;margin-top:8px;font-size:12px;display:block}.ELo9Rq_editorBinary{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:12px;padding:24px 16px;display:flex}.ELo9Rq_editorBinaryNotice{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_editorDownloadLink{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-strong-12);cursor:pointer;transition:background var(--ds-transition-duration-slow) var(--ds-ease-in-out), border-color var(--ds-transition-duration-slow) var(--ds-ease-in-out);border-radius:6px;align-items:center;gap:6px;padding:6px 14px;text-decoration:none;display:inline-flex}.ELo9Rq_editorDownloadLink:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l2)}.ELo9Rq_editorError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);padding:12px 16px}.ELo9Rq_editorBanner{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex:none;padding:4px 8px}.ELo9Rq_sandboxStatus{font:var(--dsw-font-xxxs-11);flex:none;align-items:center;gap:8px;padding:4px 10px;display:flex}.ELo9Rq_sandboxStatusOn{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l1)}.ELo9Rq_sandboxStatusOff{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-bottom:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent)}.ELo9Rq_sandboxDot{background:var(--dsw-alias-state-success-primary);border-radius:50%;flex:none;width:6px;height:6px}.ELo9Rq_sandboxStatusOff .ELo9Rq_sandboxDot{background:var(--dsw-alias-state-error-primary)}.ELo9Rq_sandboxStatusText{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}.ELo9Rq_sandboxAction{border:1px solid var(--dsw-alias-border-l2);font:inherit;color:inherit;cursor:pointer;background:0 0;border-radius:6px;flex:none;padding:2px 8px}.ELo9Rq_sandboxAction:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_editorHtml{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.ELo9Rq_browser{flex-direction:column;flex:1;min-height:0;display:flex}.ELo9Rq_browserBar{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:4px;padding:6px 8px;display:flex}.ELo9Rq_browserInput{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0;height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 10px}.ELo9Rq_browserInput:focus{border-color:var(--dsw-alias-border-l2);outline:none}.ELo9Rq_browserMessage{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex:none;padding:4px 12px}.ELo9Rq_browserFrame{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.ELo9Rq_browserStart{text-align:center;min-height:0;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary);flex:1;justify-content:center;align-items:center;padding:20px;display:flex}.ELo9Rq_browserBlocked{text-align:center;min-height:0;color:var(--dsw-alias-state-warn-primary);flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;padding:24px;display:flex}.ELo9Rq_browserBlockedTitle{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary)}.ELo9Rq_browserBlockedDesc{max-width:280px;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-secondary)}.ELo9Rq_browserBlockedActions{gap:8px;margin-top:6px;display:flex}.ELo9Rq_browserBlockedButton{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxxs-11);cursor:pointer;border-radius:6px;padding:4px 12px}.ELo9Rq_browserBlockedButton:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_editorCm{background:0 0;flex:1;min-height:0;overflow:hidden}.ELo9Rq_editorCmHidden{display:none}.ELo9Rq_editorCm .cm-editor{height:100%}.ELo9Rq_editorCm .cm-scroller{padding:12px 16px}.ELo9Rq_editorCm .cm-editor.cm-focused{outline:none}.ELo9Rq_editorModeToggle{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:6px;flex:none;align-items:center;gap:2px;padding:2px;display:inline-flex}.ELo9Rq_editorModeButton{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);cursor:pointer;background:0 0;border:none;border-radius:4px;padding:2px 8px}.ELo9Rq_editorModeButton:hover{color:var(--dsw-alias-label-primary)}.ELo9Rq_editorModeActive{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}.ELo9Rq_editorImageWrap{flex:1;justify-content:center;align-items:center;min-height:0;padding:12px;display:flex;overflow:auto}.ELo9Rq_editorImage{object-fit:contain;max-width:100%;max-height:100%}.ELo9Rq_editorMd{min-height:0;font:var(--dsw-font-xs-13);flex:1;padding:12px 16px;overflow-y:auto}.ELo9Rq_mermaidWrap{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:6px;margin:6px 0;overflow:hidden}.ELo9Rq_mermaidHeader{border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);justify-content:space-between;align-items:center;gap:6px;padding:4px 8px;display:flex}.ELo9Rq_mermaidInfo{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_mermaidCopy{height:20px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-11);cursor:pointer;background:0 0;border:none;border-radius:4px;align-items:center;gap:4px;padding:0 6px;display:inline-flex}.ELo9Rq_mermaidCopy:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_mermaidBody{cursor:zoom-in;justify-content:center;padding:10px;display:flex;overflow:auto}.ELo9Rq_mermaidBody svg{max-width:100%;height:auto}.ELo9Rq_mermaidError{border-bottom:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-state-error-primary);font:var(--dsw-font-xxxs-11);padding:6px 10px}.ELo9Rq_mermaidCode{font:var(--dsw-font-xxxs-11);margin:0;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:auto}.ELo9Rq_mermaidMarkdown .md-code-block[data-mermaid-processed]{display:contents}.ELo9Rq_mermaidModal{z-index:1000;background:var(--dsw-alias-bg-mask-1);backdrop-filter:blur(2px);flex-direction:column;justify-content:center;align-items:center;display:flex;position:fixed;inset:0}.ELo9Rq_mermaidModalToolbar{z-index:10;gap:8px;display:flex;position:absolute;top:16px;right:16px}.ELo9Rq_mermaidModalButton{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);width:36px;height:36px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xs-strong-13);cursor:pointer;border-radius:8px;justify-content:center;align-items:center;display:inline-flex}.ELo9Rq_mermaidModalButton:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_mermaidModalStage{justify-content:center;align-items:center;width:90vw;height:80vh;display:flex;position:relative;overflow:hidden}.ELo9Rq_mermaidModalStage svg{cursor:grab;transform-origin:50%;user-select:none;-webkit-user-drag:none;background:var(--dsw-alias-bg-layer-1);border-radius:12px;max-width:none;max-height:none;padding:16px}.ELo9Rq_mermaidModalStage svg:active{cursor:grabbing}.ELo9Rq_mermaidModalHint{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);pointer-events:none;position:absolute;bottom:16px;left:50%;transform:translate(-50%)}.ELo9Rq_selectionPopup{z-index:60;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);height:28px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxxs-strong-11);white-space:nowrap;cursor:pointer;border-radius:6px;align-items:center;padding:0 10px;display:inline-flex;position:fixed;transform:translate(-50%,calc(-100% - 8px))}.ELo9Rq_selectionPopup:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_editorPdf{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-height:0;display:flex}.ELo9Rq_editorPdfToolbar{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;justify-content:flex-end;padding:6px 8px;display:flex}.ELo9Rq_editorPdfStage{flex:1;min-height:0;display:flex;position:relative}.ELo9Rq_editorPdfFrame{background:var(--dsw-alias-bg-base);border:none;flex:1;width:100%;min-height:0}.ELo9Rq_editorPdfFrameBlocked{pointer-events:none}.ELo9Rq_editorPdfDragShield{z-index:4;pointer-events:none;background:0 0;position:absolute;inset:0}.ELo9Rq_editorPdfDragShieldActive{pointer-events:auto}body[data-dsh-tab-dragging] .ELo9Rq_editorPdfFrame{pointer-events:none!important}body[data-dsh-tab-dragging] .ELo9Rq_editorPdfDragShield{pointer-events:auto!important}.ELo9Rq_terminalWrap{background:var(--dsw-alias-bg-base);flex-direction:column;flex:1;min-height:0;display:flex;position:relative}.ELo9Rq_terminal{flex:1;min-height:0;padding:6px 4px 6px 8px}.ELo9Rq_terminal .xterm{height:100%}.ELo9Rq_terminalBanner{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex-wrap:wrap;flex:none;align-items:center;gap:8px;padding:3px 10px;display:flex}.ELo9Rq_terminalBannerUrl{word-break:break-all;opacity:.85;flex-basis:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.ELo9Rq_boundaryError{z-index:50;background:var(--dsw-alias-bg-layer-1);border-left:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);flex-direction:column;align-items:flex-start;gap:8px;padding:16px;display:flex;position:fixed;top:0;bottom:0;right:0;overflow:auto}.ELo9Rq_terminalRetry{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;border-radius:999px;flex:none;padding:1px 8px}.ELo9Rq_terminalRetry:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_terminalDepsBanner{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary);flex-direction:column;flex:none;gap:6px;padding:10px;display:flex}.ELo9Rq_terminalDepsTitle{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-state-warn-primary)}.ELo9Rq_terminalDepsHint{opacity:.9}.ELo9Rq_terminalDepsCommandRow{align-items:flex-start;gap:8px;display:flex}.ELo9Rq_terminalRepairCommand{white-space:pre-wrap;word-break:break-all;user-select:text;min-width:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:4px;flex:1;max-height:160px;margin:0;padding:6px 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;overflow:auto}.ELo9Rq_terminalDepsNote{opacity:.85}.ELo9Rq_terminalDepsActions{align-items:center;gap:8px;display:flex}.ELo9Rq_tabBoundaryError{min-height:0;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);flex-direction:column;flex:1;align-items:flex-start;gap:8px;padding:12px 16px;display:flex;overflow:auto}.ELo9Rq_git{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden auto}.ELo9Rq_gitHeader{flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.ELo9Rq_gitWorktreeRow{flex:none;align-items:center;gap:8px;padding:6px 8px 0 12px;display:flex}.ELo9Rq_gitWorktreeLabel{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11);flex:none}.ELo9Rq_gitBranchSelect{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);min-width:0;height:26px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);border-radius:6px;flex:1;padding:0 6px}.ELo9Rq_gitSection{border-top:1px solid var(--dsw-alias-border-l1)}.ELo9Rq_gitSectionHeader{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary);text-transform:uppercase;justify-content:space-between;align-items:center;padding:6px 12px 4px;display:flex}.ELo9Rq_gitLink{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-brand-primary);cursor:pointer;background:0 0;border:none;padding:0}.ELo9Rq_gitLink:hover:not(:disabled){text-decoration:underline}.ELo9Rq_gitLink:disabled{opacity:.4;cursor:default}.ELo9Rq_gitRow{min-height:34px;animation:ELo9Rq_dsh-row-in .15s var(--ds-ease-in-out);border-radius:8px;align-items:center;gap:6px;margin:0 6px;padding:0 8px;display:flex}.ELo9Rq_gitRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_gitRowSelected{background:var(--dsw-alias-interactive-bg-active)}.ELo9Rq_gitRowMain{cursor:pointer;text-align:left;background:0 0;border:none;flex:1;align-items:center;gap:8px;min-width:0;padding:3px 0;display:flex}.ELo9Rq_gitBadge{width:20px;height:16px;font:var(--dsw-font-xxxs-strong-11);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);border-radius:4px;flex:none;justify-content:center;align-items:center;display:inline-flex}.ELo9Rq_gitName{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.ELo9Rq_gitEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);padding:4px 12px 8px}.ELo9Rq_gitPlaceholder{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;padding:16px}.ELo9Rq_gitError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;padding:8px 12px}.ELo9Rq_gitDiff{border-top:1px solid var(--dsw-alias-border-l1);padding:8px}.ELo9Rq_gitDiffTab{flex-direction:column;flex:1;min-width:0;min-height:0;display:flex;overflow:hidden auto}.ELo9Rq_gitDiffTabHeader{border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.ELo9Rq_gitDiffTabTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.ELo9Rq_gitDiffFile{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;align-items:baseline;gap:6px;padding:8px 2px 2px;display:flex}.ELo9Rq_gitDiffFile:disabled{cursor:default}.ELo9Rq_gitDiffFile:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_gitDiffFileChevron{color:var(--dsw-alias-label-tertiary);flex:none;transform:rotate(0)}.ELo9Rq_gitDiffFileChevronExpanded{transform:rotate(90deg)}.ELo9Rq_gitDiffFilePath{font:var(--dsw-font-xxs-strong-12);color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.ELo9Rq_gitDiffFileOld{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:40%;overflow:hidden}.ELo9Rq_gitDiffFileTag{border:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:0 6px}.ELo9Rq_gitDiffHunk{font:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-tertiary);gap:8px;padding:3px 2px;display:flex}.ELo9Rq_gitDiffHunkHeader{color:var(--dsw-alias-label-secondary);flex:none}.ELo9Rq_gitDiffHunkSection{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.ELo9Rq_gitDiffLine{font:var(--dsw-font-markdown-code-block-small);white-space:pre-wrap;overflow-wrap:anywhere;align-items:stretch;min-width:0;line-height:20px;display:flex}.ELo9Rq_gitDiffNum{text-align:right;width:36px;color:var(--dsw-alias-label-tertiary);user-select:none;flex:none;padding-right:8px}.ELo9Rq_gitDiffCode{flex:1;min-width:0;overflow:visible}.ELo9Rq_gitDiffCtx{color:var(--dsw-alias-label-primary)}.ELo9Rq_gitDiffDel{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)}.ELo9Rq_gitDiffAdd{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)}.ELo9Rq_gitDiffMeta{padding-left:2px}.ELo9Rq_gitDiffMetaText{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);font-style:italic}.ELo9Rq_gitDiffExpand{width:100%;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-brand-primary);cursor:pointer;text-align:center;background:0 0;border:none;margin:4px 0;display:block}.ELo9Rq_gitDiffExpand:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_gitConfirmDesc{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);white-space:pre-wrap;margin:0}.ELo9Rq_gitCommit{border-top:1px solid var(--dsw-alias-border-l1);align-items:center;gap:6px;padding:8px 12px;display:flex}.ELo9Rq_gitCommitInput{flex:1;min-width:0}.ELo9Rq_gitCommitButton{background:var(--dsw-alias-button-primary-fill);height:26px;color:var(--dsw-alias-label-primary-inverted);font:var(--dsw-font-xxs-strong-12);cursor:pointer;border:none;border-radius:6px;flex:none;padding:0 12px}.ELo9Rq_gitCommitButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.ELo9Rq_gitCommitButton:disabled{opacity:.45;cursor:default}.ELo9Rq_gitLogRow{cursor:pointer;border-radius:8px;flex-direction:column;gap:2px;padding:5px 12px;display:flex}.ELo9Rq_gitLogRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.ELo9Rq_gitLogLine1{align-items:baseline;gap:8px;min-width:0;display:flex}.ELo9Rq_gitLogHash{font:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-tertiary);flex:none}.ELo9Rq_gitLogLine2{flex-wrap:wrap;align-items:center;gap:6px;min-width:0;display:flex}.ELo9Rq_gitLogRef{border:1px solid var(--dsw-alias-border-l2);font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-brand-primary);white-space:nowrap;border-radius:999px;flex:none;padding:0 5px}.ELo9Rq_gitLogSubject{text-overflow:ellipsis;white-space:nowrap;min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.ELo9Rq_gitLogMeta{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_gitLogMore{border:1px solid var(--dsw-alias-border-l2);width:calc(100% - 24px);font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border-radius:6px;margin:4px 12px 8px;padding:6px 0;display:block}.ELo9Rq_gitLogMore:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_gitLogMore:disabled{opacity:.5;cursor:default}.ELo9Rq_producedRow{flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;display:flex}.ELo9Rq_producedLabel{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_producedChip{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);max-width:200px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);cursor:pointer;border-radius:999px;align-items:center;gap:4px;padding:2px 8px;display:inline-flex;overflow:hidden}.ELo9Rq_producedChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_producedChip span{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.ELo9Rq_producedMore{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary)}.ELo9Rq_toggleButton:focus-visible,.ELo9Rq_bottomClose:focus-visible,.ELo9Rq_iconButton:focus-visible,.ELo9Rq_tab:focus-visible,.ELo9Rq_tabClose:focus-visible,.ELo9Rq_tabBarPlus:focus-visible,.ELo9Rq_paneCard:focus-visible,.ELo9Rq_explorerRow:focus-visible,.ELo9Rq_explorerRef:focus-visible,.ELo9Rq_gitRowMain:focus-visible,.ELo9Rq_gitLink:focus-visible,.ELo9Rq_gitCommitButton:focus-visible,.ELo9Rq_gitLogRow:focus-visible,.ELo9Rq_gitLogMore:focus-visible,.ELo9Rq_gitDiffFile:focus-visible,.ELo9Rq_gitDiffExpand:focus-visible,.ELo9Rq_terminalRetry:focus-visible,.ELo9Rq_editorModeButton:focus-visible,.ELo9Rq_editorDownloadLink:focus-visible,.ELo9Rq_editorPptxButton:focus-visible,.ELo9Rq_editorDocxZoomRange:focus-visible{outline:2px solid var(--dsw-alias-interactive-bg-hover-accent);outline-offset:-1px}@media (prefers-reduced-motion:reduce){.ELo9Rq_panel,.ELo9Rq_panelHidden,.ELo9Rq_bottomPanel,.ELo9Rq_bottomPanelHidden,.ELo9Rq_toggleCluster,.ELo9Rq_toggleButton,.ELo9Rq_tab,.ELo9Rq_tabBarPlus,.ELo9Rq_paneCard,.ELo9Rq_explorerRow,.ELo9Rq_gitRow,.ELo9Rq_divider,.ELo9Rq_dividerRow:after,.ELo9Rq_dividerCol:after{transition:none;animation:none}}@media (width<=767px){.ELo9Rq_panel:not(.ELo9Rq_panelHidden) .ELo9Rq_tabBar{padding-right:40px}.ELo9Rq_tab{min-width:48px;max-width:128px}}.ELo9Rq_openWithLabel{align-items:center;gap:8px;width:100%;min-width:0;display:flex}.ELo9Rq_openWithName{text-overflow:ellipsis;white-space:nowrap;flex:auto;min-width:0;overflow:hidden}.ELo9Rq_openWithChevron{color:var(--dsw-alias-label-tertiary);flex:none}.ELo9Rq_openWithPin{width:20px;height:20px;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px;flex:none;justify-content:center;align-items:center;display:inline-flex}.ELo9Rq_openWithPin:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_openWithPinActive{color:var(--dsw-alias-state-business-primary)}.ELo9Rq_editorHtmlBlock{margin:8px 0}.ELo9Rq_editorHtmlBlock img,.ELo9Rq_editorHtmlBlock video{max-width:100%}.ELo9Rq_editorHtmlBlock details{margin:4px 0;padding:4px 0}.ELo9Rq_editorHtmlBlock summary{cursor:pointer}.ELo9Rq_tocBar{z-index:3;pointer-events:none;justify-content:flex-end;height:0;display:flex;position:sticky;top:0}.ELo9Rq_tocButton{pointer-events:auto;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);width:26px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:6px;justify-content:center;align-items:center;margin:4px 2px 0 0;padding:0;display:inline-flex}.ELo9Rq_tocButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_tocPanel{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);width:min(300px,82%);max-height:60vh;box-shadow:var(--dsw-shadow-lv2);pointer-events:auto;border-radius:8px;flex-direction:column;padding:4px;display:flex;position:absolute;top:32px;right:2px;overflow-y:auto}.ELo9Rq_tocItem{min-width:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:6px;align-items:baseline;gap:8px;padding:4px 8px;display:flex}.ELo9Rq_tocItem:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.ELo9Rq_tocItem[data-level=\"2\"]{padding-left:18px}.ELo9Rq_tocItem[data-level=\"3\"]{padding-left:28px}.ELo9Rq_tocItem[data-level=\"4\"]{padding-left:38px}.ELo9Rq_tocItem[data-level=\"5\"]{padding-left:48px}.ELo9Rq_tocItem[data-level=\"6\"]{padding-left:58px}.ELo9Rq_tocItemLevel{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.ELo9Rq_tocItemText{text-overflow:ellipsis;white-space:nowrap;flex:auto;min-width:0;overflow:hidden}@keyframes ELo9Rq_dsh-toc-flash{0%,60%{background:var(--dsw-alias-interactive-bg-hover)}to{background:0 0}}.ELo9Rq_tocFlash{border-radius:4px;animation:1.2s ease-out ELo9Rq_dsh-toc-flash}";
 		const tagId$4 = "dsh-external/dsh-sidebar-lite/sidebar.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$4) + "]") === null) {
 			const tag = document.createElement("style");
@@ -9792,246 +9664,246 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var sidebar_module_css_default = {
-			"gitLink": "xoxv9G_gitLink",
-			"gitBadge": "xoxv9G_gitBadge",
-			"gitDiffHunkSection": "xoxv9G_gitDiffHunkSection",
-			"divider": "xoxv9G_divider",
-			"editorHtml": "xoxv9G_editorHtml",
-			"floatDropHintLabel": "xoxv9G_floatDropHintLabel",
-			"dirtyDot": "xoxv9G_dirtyDot",
-			"splitChild": "xoxv9G_splitChild",
-			"uploadOverlayCard": "xoxv9G_uploadOverlayCard",
-			"orphanedType": "xoxv9G_orphanedType",
-			"git": "xoxv9G_git",
-			"floatWindow": "xoxv9G_floatWindow",
-			"sandboxStatusOn": "xoxv9G_sandboxStatusOn",
-			"mermaidModalButton": "xoxv9G_mermaidModalButton",
-			"editorBinary": "xoxv9G_editorBinary",
-			"editorSearchHint": "xoxv9G_editorSearchHint",
-			"uploadOverlayStatus": "xoxv9G_uploadOverlayStatus",
-			"gitRow": "xoxv9G_gitRow",
-			"gitDiffAdd": "xoxv9G_gitDiffAdd",
-			"gitDiffMetaText": "xoxv9G_gitDiffMetaText",
-			"editorImageWrap": "xoxv9G_editorImageWrap",
-			"gitLogSubject": "xoxv9G_gitLogSubject",
-			"dsh-row-in": "xoxv9G_dsh-row-in",
-			"bottomPanelHidden": "xoxv9G_bottomPanelHidden",
-			"gitCommit": "xoxv9G_gitCommit",
-			"paneCard": "xoxv9G_paneCard",
-			"bottomPanel": "xoxv9G_bottomPanel",
-			"gitCommitInput": "xoxv9G_gitCommitInput",
-			"tabActive": "xoxv9G_tabActive",
-			"tabBadge": "xoxv9G_tabBadge",
-			"gitLogRow": "xoxv9G_gitLogRow",
-			"gitLogMeta": "xoxv9G_gitLogMeta",
-			"gitDiffFilePath": "xoxv9G_gitDiffFilePath",
-			"uploadDropHero": "xoxv9G_uploadDropHero",
-			"toggleCluster": "xoxv9G_toggleCluster",
-			"explorerRowRevealed": "xoxv9G_explorerRowRevealed",
-			"dropUp": "xoxv9G_dropUp",
-			"floatResize": "xoxv9G_floatResize",
-			"explorerDir": "xoxv9G_explorerDir",
-			"mermaidCopy": "xoxv9G_mermaidCopy",
-			"uploadOverlayCancel": "xoxv9G_uploadOverlayCancel",
-			"sandboxStatusText": "xoxv9G_sandboxStatusText",
-			"explorerBody": "xoxv9G_explorerBody",
-			"editorTreePanelFull": "xoxv9G_editorTreePanelFull",
-			"sandboxStatusOff": "xoxv9G_sandboxStatusOff",
-			"gitLogLine1": "xoxv9G_gitLogLine1",
-			"producedRow": "xoxv9G_producedRow",
-			"editorPathInput": "xoxv9G_editorPathInput",
-			"editorSearchResult": "xoxv9G_editorSearchResult",
-			"terminalDepsTitle": "xoxv9G_terminalDepsTitle",
-			"terminalDepsActions": "xoxv9G_terminalDepsActions",
-			"editorBanner": "xoxv9G_editorBanner",
-			"panelHidden": "xoxv9G_panelHidden",
-			"explorerError": "xoxv9G_explorerError",
-			"gitDiffDel": "xoxv9G_gitDiffDel",
-			"explorerRow": "xoxv9G_explorerRow",
-			"gitConfirmDesc": "xoxv9G_gitConfirmDesc",
-			"gitSectionHeader": "xoxv9G_gitSectionHeader",
-			"gitPlaceholder": "xoxv9G_gitPlaceholder",
-			"mermaidModal": "xoxv9G_mermaidModal",
-			"explorerCopied": "xoxv9G_explorerCopied",
-			"gitDiffHunkHeader": "xoxv9G_gitDiffHunkHeader",
-			"mermaidInfo": "xoxv9G_mermaidInfo",
-			"tocButton": "xoxv9G_tocButton",
-			"uploadOverlayProgress": "xoxv9G_uploadOverlayProgress",
-			"browserBlockedDesc": "xoxv9G_browserBlockedDesc",
-			"boundaryError": "xoxv9G_boundaryError",
-			"uploadOverlayTitle": "xoxv9G_uploadOverlayTitle",
-			"gitDiffHunk": "xoxv9G_gitDiffHunk",
-			"gitLogHash": "xoxv9G_gitLogHash",
-			"tocFlash": "xoxv9G_tocFlash",
-			"gitLogRef": "xoxv9G_gitLogRef",
-			"editorBody": "xoxv9G_editorBody",
-			"workbench": "xoxv9G_workbench",
-			"paneDrop": "xoxv9G_paneDrop",
-			"dividerRow": "xoxv9G_dividerRow",
-			"bottomClose": "xoxv9G_bottomClose",
-			"editorMd": "xoxv9G_editorMd",
-			"editorModeToggle": "xoxv9G_editorModeToggle",
-			"floatHeader": "xoxv9G_floatHeader",
-			"editorPdfDragShield": "xoxv9G_editorPdfDragShield",
-			"browserBlockedTitle": "xoxv9G_browserBlockedTitle",
-			"editorTreeToggleActive": "xoxv9G_editorTreeToggleActive",
-			"gitBranchSelect": "xoxv9G_gitBranchSelect",
-			"gitDiffLine": "xoxv9G_gitDiffLine",
-			"producedChip": "xoxv9G_producedChip",
-			"uploadOverlay": "xoxv9G_uploadOverlay",
-			"editorPdfFrame": "xoxv9G_editorPdfFrame",
-			"editorPdfToolbar": "xoxv9G_editorPdfToolbar",
-			"uploadDropZonePill": "xoxv9G_uploadDropZonePill",
-			"editorMain": "xoxv9G_editorMain",
-			"browserBlockedButton": "xoxv9G_browserBlockedButton",
-			"toggleButton": "xoxv9G_toggleButton",
-			"tocPanel": "xoxv9G_tocPanel",
-			"terminalRetry": "xoxv9G_terminalRetry",
-			"editorStatusError": "xoxv9G_editorStatusError",
-			"gitWorktreeLabel": "xoxv9G_gitWorktreeLabel",
-			"gitDiffTabHeader": "xoxv9G_gitDiffTabHeader",
-			"floatContent": "xoxv9G_floatContent",
-			"splitCol": "xoxv9G_splitCol",
-			"paneTab": "xoxv9G_paneTab",
-			"tabBarPlus": "xoxv9G_tabBarPlus",
-			"floatWindowDragging": "xoxv9G_floatWindowDragging",
-			"sandboxDot": "xoxv9G_sandboxDot",
-			"tocItem": "xoxv9G_tocItem",
-			"producedLabel": "xoxv9G_producedLabel",
-			"terminalBanner": "xoxv9G_terminalBanner",
-			"openWithChevron": "xoxv9G_openWithChevron",
-			"explorerEmpty": "xoxv9G_explorerEmpty",
-			"dropRight": "xoxv9G_dropRight",
-			"explorerBroken": "xoxv9G_explorerBroken",
-			"floatTitle": "xoxv9G_floatTitle",
-			"browser": "xoxv9G_browser",
-			"gitDiffCtx": "xoxv9G_gitDiffCtx",
-			"sandboxAction": "xoxv9G_sandboxAction",
-			"browserMessage": "xoxv9G_browserMessage",
-			"explorerRowDropTarget": "xoxv9G_explorerRowDropTarget",
-			"editorTreeResize": "xoxv9G_editorTreeResize",
-			"editorError": "xoxv9G_editorError",
-			"uploadDropZone": "xoxv9G_uploadDropZone",
-			"browserInput": "xoxv9G_browserInput",
-			"dividerActive": "xoxv9G_dividerActive",
-			"cornerHandle": "xoxv9G_cornerHandle",
-			"uploadDropChatHint": "xoxv9G_uploadDropChatHint",
-			"editorPdf": "xoxv9G_editorPdf",
-			"explorerSymlink": "xoxv9G_explorerSymlink",
-			"terminalDepsBanner": "xoxv9G_terminalDepsBanner",
-			"dropOverlay": "xoxv9G_dropOverlay",
-			"gitDiffTab": "xoxv9G_gitDiffTab",
-			"gitDiffFileTag": "xoxv9G_gitDiffFileTag",
-			"mermaidBody": "xoxv9G_mermaidBody",
-			"gitName": "xoxv9G_gitName",
-			"iconButton": "xoxv9G_iconButton",
-			"gitError": "xoxv9G_gitError",
-			"editorCm": "xoxv9G_editorCm",
-			"gitDiffFile": "xoxv9G_gitDiffFile",
-			"browserBlocked": "xoxv9G_browserBlocked",
-			"editorCmHidden": "xoxv9G_editorCmHidden",
-			"editorDownloadLink": "xoxv9G_editorDownloadLink",
-			"uploadDropZoneText": "xoxv9G_uploadDropZoneText",
-			"browserStart": "xoxv9G_browserStart",
-			"paneEmptyCards": "xoxv9G_paneEmptyCards",
-			"explorerHeader": "xoxv9G_explorerHeader",
-			"tabTitle": "xoxv9G_tabTitle",
-			"terminalRepairCommand": "xoxv9G_terminalRepairCommand",
-			"mermaidHeader": "xoxv9G_mermaidHeader",
-			"explorerRef": "xoxv9G_explorerRef",
-			"gitRowMain": "xoxv9G_gitRowMain",
-			"gitDiffCode": "xoxv9G_gitDiffCode",
-			"openWithPin": "xoxv9G_openWithPin",
-			"editorTreeSearch": "xoxv9G_editorTreeSearch",
-			"dsh-toc-flash": "xoxv9G_dsh-toc-flash",
-			"terminalBannerUrl": "xoxv9G_terminalBannerUrl",
-			"editorPlaceholder": "xoxv9G_editorPlaceholder",
-			"terminalDepsCommandRow": "xoxv9G_terminalDepsCommandRow",
-			"editor": "xoxv9G_editor",
-			"pane": "xoxv9G_pane",
-			"tocBar": "xoxv9G_tocBar",
-			"panelResize": "xoxv9G_panelResize",
-			"dropLeft": "xoxv9G_dropLeft",
-			"openWithName": "xoxv9G_openWithName",
-			"gitDiffFileChevronExpanded": "xoxv9G_gitDiffFileChevronExpanded",
-			"gitHeader": "xoxv9G_gitHeader",
-			"tabList": "xoxv9G_tabList",
-			"editorHtmlBlock": "xoxv9G_editorHtmlBlock",
-			"dropDown": "xoxv9G_dropDown",
-			"gitDiffNum": "xoxv9G_gitDiffNum",
-			"uploadOverlayProgressFill": "xoxv9G_uploadOverlayProgressFill",
-			"mermaidWrap": "xoxv9G_mermaidWrap",
-			"floatDropHint": "xoxv9G_floatDropHint",
-			"editorHeader": "xoxv9G_editorHeader",
-			"editorPdfDragShieldActive": "xoxv9G_editorPdfDragShieldActive",
-			"sandboxStatus": "xoxv9G_sandboxStatus",
-			"terminalWrap": "xoxv9G_terminalWrap",
-			"paneTabHidden": "xoxv9G_paneTabHidden",
-			"explorerHidden": "xoxv9G_explorerHidden",
-			"gitDiff": "xoxv9G_gitDiff",
-			"bottomResizeActive": "xoxv9G_bottomResizeActive",
-			"mermaidModalToolbar": "xoxv9G_mermaidModalToolbar",
-			"tabClose": "xoxv9G_tabClose",
-			"mermaidError": "xoxv9G_mermaidError",
-			"floatClose": "xoxv9G_floatClose",
-			"editorModeActive": "xoxv9G_editorModeActive",
-			"editorBinaryNotice": "xoxv9G_editorBinaryNotice",
-			"panelResizeActive": "xoxv9G_panelResizeActive",
-			"panelBody": "xoxv9G_panelBody",
-			"tabBoundaryError": "xoxv9G_tabBoundaryError",
-			"editorModeButton": "xoxv9G_editorModeButton",
-			"explorerName": "xoxv9G_explorerName",
-			"tocItemText": "xoxv9G_tocItemText",
-			"gitDiffMeta": "xoxv9G_gitDiffMeta",
-			"paneContent": "xoxv9G_paneContent",
-			"gitDiffFileOld": "xoxv9G_gitDiffFileOld",
-			"producedMore": "xoxv9G_producedMore",
-			"gitRowSelected": "xoxv9G_gitRowSelected",
-			"gitSection": "xoxv9G_gitSection",
-			"panel": "xoxv9G_panel",
-			"dropCenter": "xoxv9G_dropCenter",
-			"editorPdfFrameBlocked": "xoxv9G_editorPdfFrameBlocked",
-			"gitWorktreeRow": "xoxv9G_gitWorktreeRow",
-			"gitEmpty": "xoxv9G_gitEmpty",
-			"browserFrame": "xoxv9G_browserFrame",
-			"gitCommitButton": "xoxv9G_gitCommitButton",
-			"dividerCol": "xoxv9G_dividerCol",
-			"mermaidCode": "xoxv9G_mermaidCode",
-			"gitLogMore": "xoxv9G_gitLogMore",
-			"mermaidMarkdown": "xoxv9G_mermaidMarkdown",
-			"editorDocxZoomRange": "xoxv9G_editorDocxZoomRange",
-			"explorer": "xoxv9G_explorer",
-			"browserBlockedActions": "xoxv9G_browserBlockedActions",
-			"gitDiffFileChevron": "xoxv9G_gitDiffFileChevron",
-			"gitDiffExpand": "xoxv9G_gitDiffExpand",
-			"editorTreeDock": "xoxv9G_editorTreeDock",
-			"browserBar": "xoxv9G_browserBar",
-			"editorSearchInput": "xoxv9G_editorSearchInput",
-			"editorStatus": "xoxv9G_editorStatus",
-			"splitRow": "xoxv9G_splitRow",
-			"editorTreePanel": "xoxv9G_editorTreePanel",
-			"selectionPopup": "xoxv9G_selectionPopup",
-			"editorPdfStage": "xoxv9G_editorPdfStage",
-			"mermaidModalStage": "xoxv9G_mermaidModalStage",
-			"terminalDepsNote": "xoxv9G_terminalDepsNote",
-			"explorerRoot": "xoxv9G_explorerRoot",
-			"terminal": "xoxv9G_terminal",
-			"tocItemLevel": "xoxv9G_tocItemLevel",
-			"editorImage": "xoxv9G_editorImage",
-			"gitLogLine2": "xoxv9G_gitLogLine2",
-			"gitDiffTabTitle": "xoxv9G_gitDiffTabTitle",
-			"openWithLabel": "xoxv9G_openWithLabel",
-			"editorPptxButton": "xoxv9G_editorPptxButton",
-			"split": "xoxv9G_split",
-			"tabBarDrop": "xoxv9G_tabBarDrop",
-			"tab": "xoxv9G_tab",
-			"mermaidModalHint": "xoxv9G_mermaidModalHint",
-			"terminalDepsHint": "xoxv9G_terminalDepsHint",
-			"tabBar": "xoxv9G_tabBar",
-			"uploadDropChatCard": "xoxv9G_uploadDropChatCard",
-			"bottomResize": "xoxv9G_bottomResize",
-			"openWithPinActive": "xoxv9G_openWithPinActive",
-			"editorTitle": "xoxv9G_editorTitle"
+			"mermaidCode": "ELo9Rq_mermaidCode",
+			"explorerRow": "ELo9Rq_explorerRow",
+			"browserMessage": "ELo9Rq_browserMessage",
+			"browserInput": "ELo9Rq_browserInput",
+			"floatContent": "ELo9Rq_floatContent",
+			"paneCard": "ELo9Rq_paneCard",
+			"editorBody": "ELo9Rq_editorBody",
+			"editorPdf": "ELo9Rq_editorPdf",
+			"bottomResizeActive": "ELo9Rq_bottomResizeActive",
+			"gitRowMain": "ELo9Rq_gitRowMain",
+			"mermaidModal": "ELo9Rq_mermaidModal",
+			"gitDiffFile": "ELo9Rq_gitDiffFile",
+			"tabBoundaryError": "ELo9Rq_tabBoundaryError",
+			"explorerHidden": "ELo9Rq_explorerHidden",
+			"explorerRoot": "ELo9Rq_explorerRoot",
+			"uploadDropZone": "ELo9Rq_uploadDropZone",
+			"editorMd": "ELo9Rq_editorMd",
+			"editorHeader": "ELo9Rq_editorHeader",
+			"gitDiffNum": "ELo9Rq_gitDiffNum",
+			"gitLogLine2": "ELo9Rq_gitLogLine2",
+			"gitLogSubject": "ELo9Rq_gitLogSubject",
+			"editorError": "ELo9Rq_editorError",
+			"explorerCopied": "ELo9Rq_explorerCopied",
+			"browserBar": "ELo9Rq_browserBar",
+			"editorCm": "ELo9Rq_editorCm",
+			"gitDiffFileChevronExpanded": "ELo9Rq_gitDiffFileChevronExpanded",
+			"tocButton": "ELo9Rq_tocButton",
+			"floatWindowDragging": "ELo9Rq_floatWindowDragging",
+			"cornerHandle": "ELo9Rq_cornerHandle",
+			"gitDiffDel": "ELo9Rq_gitDiffDel",
+			"openWithName": "ELo9Rq_openWithName",
+			"panelResize": "ELo9Rq_panelResize",
+			"browserFrame": "ELo9Rq_browserFrame",
+			"tocItemLevel": "ELo9Rq_tocItemLevel",
+			"editorTreePanelFull": "ELo9Rq_editorTreePanelFull",
+			"paneTab": "ELo9Rq_paneTab",
+			"mermaidHeader": "ELo9Rq_mermaidHeader",
+			"gitName": "ELo9Rq_gitName",
+			"tabTitle": "ELo9Rq_tabTitle",
+			"editorModeButton": "ELo9Rq_editorModeButton",
+			"mermaidModalButton": "ELo9Rq_mermaidModalButton",
+			"sandboxDot": "ELo9Rq_sandboxDot",
+			"gitDiffFileOld": "ELo9Rq_gitDiffFileOld",
+			"splitRow": "ELo9Rq_splitRow",
+			"gitDiffLine": "ELo9Rq_gitDiffLine",
+			"gitConfirmDesc": "ELo9Rq_gitConfirmDesc",
+			"gitCommit": "ELo9Rq_gitCommit",
+			"editorImage": "ELo9Rq_editorImage",
+			"uploadDropHero": "ELo9Rq_uploadDropHero",
+			"uploadDropZoneText": "ELo9Rq_uploadDropZoneText",
+			"terminalDepsBanner": "ELo9Rq_terminalDepsBanner",
+			"editorPdfStage": "ELo9Rq_editorPdfStage",
+			"gitBadge": "ELo9Rq_gitBadge",
+			"floatHeader": "ELo9Rq_floatHeader",
+			"dropUp": "ELo9Rq_dropUp",
+			"tabBarPlus": "ELo9Rq_tabBarPlus",
+			"gitLogLine1": "ELo9Rq_gitLogLine1",
+			"tocFlash": "ELo9Rq_tocFlash",
+			"dropDown": "ELo9Rq_dropDown",
+			"editorCmHidden": "ELo9Rq_editorCmHidden",
+			"tab": "ELo9Rq_tab",
+			"gitEmpty": "ELo9Rq_gitEmpty",
+			"gitDiffFilePath": "ELo9Rq_gitDiffFilePath",
+			"openWithPinActive": "ELo9Rq_openWithPinActive",
+			"sandboxStatusText": "ELo9Rq_sandboxStatusText",
+			"editorSearchHint": "ELo9Rq_editorSearchHint",
+			"bottomClose": "ELo9Rq_bottomClose",
+			"explorer": "ELo9Rq_explorer",
+			"bottomPanelHidden": "ELo9Rq_bottomPanelHidden",
+			"uploadOverlay": "ELo9Rq_uploadOverlay",
+			"editorTitle": "ELo9Rq_editorTitle",
+			"gitLink": "ELo9Rq_gitLink",
+			"terminalDepsActions": "ELo9Rq_terminalDepsActions",
+			"explorerBody": "ELo9Rq_explorerBody",
+			"tocPanel": "ELo9Rq_tocPanel",
+			"terminal": "ELo9Rq_terminal",
+			"gitCommitInput": "ELo9Rq_gitCommitInput",
+			"editorTreeToggleActive": "ELo9Rq_editorTreeToggleActive",
+			"gitPlaceholder": "ELo9Rq_gitPlaceholder",
+			"gitHeader": "ELo9Rq_gitHeader",
+			"editorPdfDragShieldActive": "ELo9Rq_editorPdfDragShieldActive",
+			"mermaidModalHint": "ELo9Rq_mermaidModalHint",
+			"gitLogRow": "ELo9Rq_gitLogRow",
+			"gitLogMeta": "ELo9Rq_gitLogMeta",
+			"uploadDropChatHint": "ELo9Rq_uploadDropChatHint",
+			"gitWorktreeRow": "ELo9Rq_gitWorktreeRow",
+			"gitDiffCtx": "ELo9Rq_gitDiffCtx",
+			"gitError": "ELo9Rq_gitError",
+			"gitWorktreeLabel": "ELo9Rq_gitWorktreeLabel",
+			"gitDiffTab": "ELo9Rq_gitDiffTab",
+			"gitDiffHunkSection": "ELo9Rq_gitDiffHunkSection",
+			"gitLogHash": "ELo9Rq_gitLogHash",
+			"editor": "ELo9Rq_editor",
+			"editorHtml": "ELo9Rq_editorHtml",
+			"editorBinaryNotice": "ELo9Rq_editorBinaryNotice",
+			"pane": "ELo9Rq_pane",
+			"gitDiffAdd": "ELo9Rq_gitDiffAdd",
+			"editorMain": "ELo9Rq_editorMain",
+			"browserBlockedActions": "ELo9Rq_browserBlockedActions",
+			"gitRowSelected": "ELo9Rq_gitRowSelected",
+			"explorerName": "ELo9Rq_explorerName",
+			"gitDiffHunk": "ELo9Rq_gitDiffHunk",
+			"explorerSymlink": "ELo9Rq_explorerSymlink",
+			"editorHtmlBlock": "ELo9Rq_editorHtmlBlock",
+			"explorerHeader": "ELo9Rq_explorerHeader",
+			"editorPathInput": "ELo9Rq_editorPathInput",
+			"editorStatus": "ELo9Rq_editorStatus",
+			"split": "ELo9Rq_split",
+			"explorerError": "ELo9Rq_explorerError",
+			"dirtyDot": "ELo9Rq_dirtyDot",
+			"panel": "ELo9Rq_panel",
+			"terminalBannerUrl": "ELo9Rq_terminalBannerUrl",
+			"gitDiffMetaText": "ELo9Rq_gitDiffMetaText",
+			"editorStatusError": "ELo9Rq_editorStatusError",
+			"producedRow": "ELo9Rq_producedRow",
+			"producedChip": "ELo9Rq_producedChip",
+			"panelBody": "ELo9Rq_panelBody",
+			"producedMore": "ELo9Rq_producedMore",
+			"gitDiffMeta": "ELo9Rq_gitDiffMeta",
+			"mermaidError": "ELo9Rq_mermaidError",
+			"dropCenter": "ELo9Rq_dropCenter",
+			"git": "ELo9Rq_git",
+			"gitBranchSelect": "ELo9Rq_gitBranchSelect",
+			"panelHidden": "ELo9Rq_panelHidden",
+			"uploadDropChatCard": "ELo9Rq_uploadDropChatCard",
+			"editorModeActive": "ELo9Rq_editorModeActive",
+			"mermaidCopy": "ELo9Rq_mermaidCopy",
+			"orphanedType": "ELo9Rq_orphanedType",
+			"mermaidMarkdown": "ELo9Rq_mermaidMarkdown",
+			"sandboxStatusOn": "ELo9Rq_sandboxStatusOn",
+			"gitDiffFileChevron": "ELo9Rq_gitDiffFileChevron",
+			"editorBinary": "ELo9Rq_editorBinary",
+			"floatTitle": "ELo9Rq_floatTitle",
+			"tocItem": "ELo9Rq_tocItem",
+			"explorerBroken": "ELo9Rq_explorerBroken",
+			"editorTreeResize": "ELo9Rq_editorTreeResize",
+			"editorPptxButton": "ELo9Rq_editorPptxButton",
+			"gitSection": "ELo9Rq_gitSection",
+			"gitLogRef": "ELo9Rq_gitLogRef",
+			"editorTreePanel": "ELo9Rq_editorTreePanel",
+			"floatDropHint": "ELo9Rq_floatDropHint",
+			"floatWindow": "ELo9Rq_floatWindow",
+			"editorPdfDragShield": "ELo9Rq_editorPdfDragShield",
+			"editorBanner": "ELo9Rq_editorBanner",
+			"terminalDepsNote": "ELo9Rq_terminalDepsNote",
+			"gitDiffTabTitle": "ELo9Rq_gitDiffTabTitle",
+			"dropOverlay": "ELo9Rq_dropOverlay",
+			"gitRow": "ELo9Rq_gitRow",
+			"toggleCluster": "ELo9Rq_toggleCluster",
+			"gitDiffCode": "ELo9Rq_gitDiffCode",
+			"terminalWrap": "ELo9Rq_terminalWrap",
+			"paneTabHidden": "ELo9Rq_paneTabHidden",
+			"dsh-toc-flash": "ELo9Rq_dsh-toc-flash",
+			"dividerCol": "ELo9Rq_dividerCol",
+			"openWithChevron": "ELo9Rq_openWithChevron",
+			"openWithLabel": "ELo9Rq_openWithLabel",
+			"panelResizeActive": "ELo9Rq_panelResizeActive",
+			"dropRight": "ELo9Rq_dropRight",
+			"divider": "ELo9Rq_divider",
+			"editorSearchInput": "ELo9Rq_editorSearchInput",
+			"browserBlockedTitle": "ELo9Rq_browserBlockedTitle",
+			"dropLeft": "ELo9Rq_dropLeft",
+			"editorSearchResult": "ELo9Rq_editorSearchResult",
+			"boundaryError": "ELo9Rq_boundaryError",
+			"explorerRef": "ELo9Rq_explorerRef",
+			"uploadOverlayTitle": "ELo9Rq_uploadOverlayTitle",
+			"editorPlaceholder": "ELo9Rq_editorPlaceholder",
+			"uploadOverlayCancel": "ELo9Rq_uploadOverlayCancel",
+			"gitDiffTabHeader": "ELo9Rq_gitDiffTabHeader",
+			"uploadOverlayProgress": "ELo9Rq_uploadOverlayProgress",
+			"terminalDepsTitle": "ELo9Rq_terminalDepsTitle",
+			"tabBarDrop": "ELo9Rq_tabBarDrop",
+			"dividerActive": "ELo9Rq_dividerActive",
+			"terminalRepairCommand": "ELo9Rq_terminalRepairCommand",
+			"tocItemText": "ELo9Rq_tocItemText",
+			"selectionPopup": "ELo9Rq_selectionPopup",
+			"dsh-row-in": "ELo9Rq_dsh-row-in",
+			"uploadOverlayCard": "ELo9Rq_uploadOverlayCard",
+			"editorPdfFrameBlocked": "ELo9Rq_editorPdfFrameBlocked",
+			"iconButton": "ELo9Rq_iconButton",
+			"explorerEmpty": "ELo9Rq_explorerEmpty",
+			"floatDropHintLabel": "ELo9Rq_floatDropHintLabel",
+			"gitDiffFileTag": "ELo9Rq_gitDiffFileTag",
+			"floatClose": "ELo9Rq_floatClose",
+			"gitDiffExpand": "ELo9Rq_gitDiffExpand",
+			"terminalRetry": "ELo9Rq_terminalRetry",
+			"bottomResize": "ELo9Rq_bottomResize",
+			"gitDiff": "ELo9Rq_gitDiff",
+			"editorPdfToolbar": "ELo9Rq_editorPdfToolbar",
+			"paneDrop": "ELo9Rq_paneDrop",
+			"paneEmptyCards": "ELo9Rq_paneEmptyCards",
+			"editorDownloadLink": "ELo9Rq_editorDownloadLink",
+			"workbench": "ELo9Rq_workbench",
+			"editorTreeDock": "ELo9Rq_editorTreeDock",
+			"tocBar": "ELo9Rq_tocBar",
+			"terminalBanner": "ELo9Rq_terminalBanner",
+			"browserBlockedButton": "ELo9Rq_browserBlockedButton",
+			"gitSectionHeader": "ELo9Rq_gitSectionHeader",
+			"gitLogMore": "ELo9Rq_gitLogMore",
+			"explorerRowDropTarget": "ELo9Rq_explorerRowDropTarget",
+			"editorModeToggle": "ELo9Rq_editorModeToggle",
+			"toggleButton": "ELo9Rq_toggleButton",
+			"floatResize": "ELo9Rq_floatResize",
+			"browserBlocked": "ELo9Rq_browserBlocked",
+			"paneContent": "ELo9Rq_paneContent",
+			"terminalDepsCommandRow": "ELo9Rq_terminalDepsCommandRow",
+			"producedLabel": "ELo9Rq_producedLabel",
+			"tabBar": "ELo9Rq_tabBar",
+			"mermaidBody": "ELo9Rq_mermaidBody",
+			"bottomPanel": "ELo9Rq_bottomPanel",
+			"dividerRow": "ELo9Rq_dividerRow",
+			"uploadOverlayProgressFill": "ELo9Rq_uploadOverlayProgressFill",
+			"uploadOverlayStatus": "ELo9Rq_uploadOverlayStatus",
+			"browserBlockedDesc": "ELo9Rq_browserBlockedDesc",
+			"gitCommitButton": "ELo9Rq_gitCommitButton",
+			"terminalDepsHint": "ELo9Rq_terminalDepsHint",
+			"editorPdfFrame": "ELo9Rq_editorPdfFrame",
+			"openWithPin": "ELo9Rq_openWithPin",
+			"browser": "ELo9Rq_browser",
+			"tabClose": "ELo9Rq_tabClose",
+			"explorerDir": "ELo9Rq_explorerDir",
+			"sandboxStatus": "ELo9Rq_sandboxStatus",
+			"explorerRowRevealed": "ELo9Rq_explorerRowRevealed",
+			"mermaidWrap": "ELo9Rq_mermaidWrap",
+			"editorDocxZoomRange": "ELo9Rq_editorDocxZoomRange",
+			"sandboxAction": "ELo9Rq_sandboxAction",
+			"tabBadge": "ELo9Rq_tabBadge",
+			"tabActive": "ELo9Rq_tabActive",
+			"editorImageWrap": "ELo9Rq_editorImageWrap",
+			"splitChild": "ELo9Rq_splitChild",
+			"splitCol": "ELo9Rq_splitCol",
+			"uploadDropZonePill": "ELo9Rq_uploadDropZonePill",
+			"mermaidModalToolbar": "ELo9Rq_mermaidModalToolbar",
+			"sandboxStatusOff": "ELo9Rq_sandboxStatusOff",
+			"tabList": "ELo9Rq_tabList",
+			"mermaidInfo": "ELo9Rq_mermaidInfo",
+			"mermaidModalStage": "ELo9Rq_mermaidModalStage",
+			"editorTreeSearch": "ELo9Rq_editorTreeSearch",
+			"browserStart": "ELo9Rq_browserStart",
+			"gitDiffHunkHeader": "ELo9Rq_gitDiffHunkHeader"
 		};
 		//#endregion
 		//#region src/client/intercept.tsx
@@ -10082,87 +9954,6 @@ window.__ModuleLoader__.load({
 				title: t("files")
 			});
 		}
-		/** The intercepted produced-files row (visual twin of the deliverables chips). */
-		function SidebarProducedFiles(props) {
-			const { matched, openInSidebar, onShowInFolder } = props;
-			const shown = matched.slice(0, 6);
-			const hidden = matched.length - shown.length;
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: sidebar_module_css_default.producedRow,
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						className: sidebar_module_css_default.producedLabel,
-						children: t("produced")
-					}),
-					shown.map((path) => {
-						const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-						const name = at === -1 ? path : path.slice(at + 1);
-						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-							type: "button",
-							className: sidebar_module_css_default.producedChip,
-							title: path,
-							onClick: () => {
-								openInSidebar(path);
-							},
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size: 12 }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: name })]
-						}, path);
-					}),
-					hidden > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-						className: sidebar_module_css_default.producedMore,
-						children: ["+", hidden]
-					}),
-					hidden > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						className: sidebar_module_css_default.producedMore,
-						style: {
-							cursor: "pointer",
-							textDecoration: "underline",
-							textUnderlineOffset: 2
-						},
-						onClick: () => {
-							onShowInFolder(matched);
-						},
-						children: t("showInFolder")
-					})
-				]
-			});
-		}
-		/**
-		* Register the turn-tail interception (returns the disposer).
-		*
-		* The slot is a CHILD slot the host's ui-conversation declares in its
-		* `conversation.chat.node` children table (kind: chain, scope: session).
-		* Registering it directly races the declaration — the ui-slots core's
-		* load-time validation throws "not declared (a parent entry's children
-		* table must declare it)" when the parent entry is not on the ledger yet.
-		* slots.inject waits for the declaration: the callback runs synchronously
-		* when the slot is already declared, otherwise it runs inside the declaring
-		* register() call once the declaration commits; declaration collapse
-		* disposes the entry and a later declaration re-registers it. This mirrors
-		* @deepseek-ai/dsh-client-ui-deliverables' registration of the same slot.
-		*/
-		function registerTurnTailInterception(ctx, store) {
-			return ctx.slots.inject("conversation.chat.turnTail", () => ctx.slots.register({
-				name: "conversation.chat.turnTail",
-				select: (owner) => {
-					if (store.getSuspended()) return null;
-					if (store.getPrefs().tabsEnabled["editor"] === false) return null;
-					const matched = selectProducedFiles(owner);
-					if (matched !== null) lastProduced = matched;
-					return matched;
-				},
-				priority: -1,
-				registrant: "dsh-sidebar-lite",
-				inject: (sessionId) => ({
-					openInSidebar: (path) => {
-						openSidebarFile(ctx, store, sessionId, path);
-					},
-					onShowInFolder: (files) => {
-						revealInExplorer(ctx, store, sessionId, files);
-					}
-				})
-			}, SidebarProducedFiles));
-		}
 		/**
 		* Register the chat file-open interception: wraps `ctx.workspaces.openPath`
 		* — the single funnel every chat-side file open goes through (tool-row path
@@ -10174,9 +9965,10 @@ window.__ModuleLoader__.load({
 		* disposer restoring the original (HMR-safe).
 		*/
 		function registerOpenPathInterception(ctx, store) {
+			if (typeof ctx.workspaces?.openPath !== "function") return () => {};
 			return wrapOpenPath(ctx.workspaces, {
 				takeoverEnabled: () => !store.getSuspended() && store.getPrefs().interceptOpenPath !== false && store.getPrefs().tabsEnabled["editor"] !== false,
-				currentSessionId: () => ctx.sessions.list.getSnapshot().current,
+				currentSessionId: () => currentSessionIdOf(ctx.sessions.list.getSnapshot()),
 				openInSidebar: (path, sessionId) => {
 					openSidebarFile(ctx, store, sessionId, path);
 				},
@@ -10712,36 +10504,6 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/icons.tsx
-		/**
-		* Right-panel toggle glyph (the "侧拉" button): a frame with a filled strip
-		* along its RIGHT edge, in the app's outline style (1.5px stroke,
-		* currentColor).
-		*/
-		const IconPanelRightOutline16 = ({ size = 16, className }) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
-			width: size,
-			height: size,
-			className,
-			viewBox: "0 0 16 16",
-			fill: "none",
-			xmlns: "http://www.w3.org/2000/svg",
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
-				x: "1.5",
-				y: "2",
-				width: "13",
-				height: "12",
-				rx: "2.5",
-				stroke: "currentColor",
-				strokeWidth: "1.5"
-			}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
-				x: "10.5",
-				y: "3.25",
-				width: "2.75",
-				height: "9.5",
-				rx: "1",
-				fill: "currentColor",
-				stroke: "none"
-			})]
-		});
 		/**
 		* Bottom-panel toggle glyph (the "底栏" button): a frame with a filled strip
 		* along its BOTTOM edge, in the app's outline style.
@@ -11703,7 +11465,7 @@ window.__ModuleLoader__.load({
 					if (target.id === "vscode") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconVscode16, { size: 16 });
 					if (target.id === "cursor") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SiCursor, { size: 16 });
 					if (target.id === "zed") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SiZedindustries, { size: 16 });
-					return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size: 16 });
+					return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutlineRegular, { size: 16 });
 				};
 				const pinned = openWithTargets.filter((target) => pinnedIds.includes(target.id)).map((target) => ({
 					id: `open-with:${target.id}`,
@@ -11749,7 +11511,7 @@ window.__ModuleLoader__.load({
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								className: sidebar_module_css_default.openWithName,
 								children: t("openWithMenu")
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutline14, {
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, {
 								size: 14,
 								className: sidebar_module_css_default.openWithChevron,
 								"aria-hidden": true
@@ -11806,7 +11568,7 @@ window.__ModuleLoader__.load({
 									className: sidebar_module_css_default.explorerName,
 									children: entry.name
 								}),
-								entry.isSymlink && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutline16, {
+								entry.isSymlink && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutlineRegular, {
 									size: 12,
 									className: sidebar_module_css_default.explorerSymlink
 								}),
@@ -11845,7 +11607,7 @@ window.__ModuleLoader__.load({
 								className: sidebar_module_css_default.explorerName,
 								children: entry.name
 							}),
-							entry.isSymlink && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutline16, {
+							entry.isSymlink && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutlineRegular, {
 								size: 12,
 								className: sidebar_module_css_default.explorerSymlink
 							}),
@@ -11960,7 +11722,7 @@ window.__ModuleLoader__.load({
 							...rowMenu?.isDir === false && onOpenFileNewTab !== void 0 ? [{
 								id: "open-new-tab",
 								label: t("openFileNewTab"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size: 16 })
+								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutlineRegular, { size: 16 })
 							}] : [],
 							...rowMenu?.isDir === false && onOpenFileSide !== void 0 ? [{
 								id: "open-side",
@@ -11971,7 +11733,7 @@ window.__ModuleLoader__.load({
 							...rowMenu?.isDir === false ? [{
 								id: "download",
 								label: t("download"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutline16, { size: 16 })
+								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutlineRegular, { size: 16 })
 							}] : [],
 							...rowMenu?.isDir === true ? [{
 								id: "upload-here",
@@ -11981,18 +11743,18 @@ window.__ModuleLoader__.load({
 							...rowMenu !== null && rowMenu.path !== root ? [{
 								id: "trash",
 								label: t("moveToTrash"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, { size: 16 }),
+								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 16 }),
 								danger: true
 							}] : [],
 							{
 								id: "relative",
 								label: t("copyRelative"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 16 })
+								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 16 })
 							},
 							{
 								id: "absolute",
 								label: t("copyAbsolute"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 16 })
+								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 16 })
 							}
 						],
 						onSelect: (id) => {
@@ -12563,7 +12325,7 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									setRefreshTick((tick) => tick + 1);
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline16, { size: 14 })
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 })
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -12585,7 +12347,7 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									folderInputRef.current?.click();
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, { size: 14 })
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenRegular, { size: 14 })
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
 								ref: fileInputRef,
@@ -13018,7 +12780,7 @@ window.__ModuleLoader__.load({
 							onClick: () => {
 								controlsRef.current?.save();
 							},
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutline16, { size: 14 })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 14 })
 						}),
 						saveLabel !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: clsx(sidebar_module_css_default.editorStatus, toolbar?.saveState === "failed" && sidebar_module_css_default.editorStatusError),
@@ -13030,7 +12792,7 @@ window.__ModuleLoader__.load({
 							"aria-label": t("refresh"),
 							title: t("refresh"),
 							onClick: refreshFile,
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline14, { size: 14 })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 })
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
@@ -13039,7 +12801,7 @@ window.__ModuleLoader__.load({
 							title: t("editorTreeToggle"),
 							"aria-pressed": treeOpen,
 							onClick: toggleTree,
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, { size: 14 })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenRegular, { size: 14 })
 						})
 					]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -13153,8 +12915,8 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:K:\work\project\dsh\dsh-sidebar-lite\src\client\SideCardSection.module.css.mjs
-		const css$3 = ".DoN7rq_section{flex-direction:column;gap:16px;width:100%;max-width:760px;display:flex}.DoN7rq_intro{color:var(--dsw-alias-label-tertiary);margin:0;padding:0 2px;font-size:13px;line-height:20px}.DoN7rq_group{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:16px;flex-direction:column;flex:none;gap:8px;padding:20px;display:flex}.DoN7rq_groupHeading{color:var(--dsw-alias-label-primary);align-items:baseline;gap:7px;padding:0 2px 6px;font-size:13px;font-weight:600;line-height:20px;display:flex}.DoN7rq_count{background:var(--dsw-alias-accent-soft,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:16px}.DoN7rq_grid{grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;display:grid}.DoN7rq_card{border:1px solid var(--dsw-alias-border-l2);min-height:106px;font:inherit;color:inherit;cursor:pointer;background:0 0;border-radius:12px;flex-direction:column;transition:background .12s,border-color .12s;display:flex;position:relative;overflow:hidden}.DoN7rq_card:not(.DoN7rq_cardOn):hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-label-dimmed)}.DoN7rq_cardOn{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 45%, transparent);background:var(--dsw-alias-interactive-bg-active)}.DoN7rq_cardMain{border-radius:inherit;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;flex:1;gap:6px;padding:12px;display:flex}.DoN7rq_cardMain:focus-visible,.DoN7rq_cardSettings:focus-visible,.DoN7rq_rowGear:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px}.DoN7rq_cardTop{align-items:center;gap:8px;min-width:0;min-height:28px;display:flex}.DoN7rq_cardIconChip{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);width:28px;height:28px;color:var(--dsw-alias-label-tertiary);border-radius:8px;flex:none;justify-content:center;align-items:center;display:inline-flex}.DoN7rq_cardOn .DoN7rq_cardIconChip{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 35%, transparent);background:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 12%, transparent);color:var(--dsw-alias-button-primary-fill)}.DoN7rq_cardTitle{min-width:0;color:var(--dsw-alias-label-secondary);white-space:nowrap;text-overflow:ellipsis;flex:1;font-size:13px;font-weight:600;line-height:20px;overflow:hidden}.DoN7rq_cardOn .DoN7rq_cardTitle{color:var(--dsw-alias-label-primary)}.DoN7rq_cardSwitch{flex:none;align-items:center;display:inline-flex}.DoN7rq_cardSwitchTrack{box-sizing:border-box;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;align-items:center;width:30px;height:16px;padding:2px;transition:background .15s,border-color .15s;display:inline-flex}.DoN7rq_cardSwitchThumb{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:10px;height:10px;transition:transform .15s,background .15s;display:block}.DoN7rq_cardOn .DoN7rq_cardSwitchTrack{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill)}.DoN7rq_cardOn .DoN7rq_cardSwitchThumb{background:var(--dsw-alias-bg-layer-3);transform:translate(14px)}.DoN7rq_cardDesc{color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;font-size:11px;line-height:16px;overflow:hidden}.DoN7rq_addCard{border-style:dashed;border-color:var(--dsw-alias-border-l2);text-align:left;align-items:flex-start;padding:12px}.DoN7rq_addCard:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.DoN7rq_addCard:hover .DoN7rq_cardTitle{color:var(--dsw-alias-label-primary)}.DoN7rq_addCard:hover .DoN7rq_cardIconChip{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 35%, transparent);color:var(--dsw-alias-button-primary-fill)}.DoN7rq_addCard:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px}.DoN7rq_cardOn .DoN7rq_cardDesc{color:var(--dsw-alias-label-secondary)}.DoN7rq_cardSettings{border:0;border-top:1px solid var(--dsw-alias-border-l1);width:100%;color:var(--dsw-alias-label-secondary);font:inherit;text-align:left;cursor:pointer;background:0 0;align-items:center;gap:6px;padding:6px 12px;font-size:11px;font-weight:500;line-height:16px;transition:background .12s,color .12s;display:flex}.DoN7rq_cardOn .DoN7rq_cardSettings{border-top-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 18%, transparent)}.DoN7rq_cardSettings:hover{background:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-brand-primary)}.DoN7rq_rowGear{border:1px solid var(--dsw-alias-border-l2);width:22px;height:22px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;transition:background .12s,border-color .12s,color .12s;display:inline-flex}.DoN7rq_rowGear:hover{border-color:var(--dsw-alias-interactive-bg-hover-accent);background:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-brand-primary)}.DoN7rq_row{border-bottom:1px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:center;gap:16px;padding:12px 2px;display:flex}.DoN7rq_row:last-child{border-bottom:none}.DoN7rq_rowText{flex-direction:column;gap:4px;min-width:0;display:flex}.DoN7rq_title{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}.DoN7rq_desc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.DoN7rq_switch{cursor:pointer;flex:none;display:inline-flex;position:relative}.DoN7rq_switchInput{opacity:0;width:1px;height:1px;margin:0;position:absolute}.DoN7rq_switchTrack{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);border-radius:10px;align-items:center;width:36px;height:20px;padding:2px;transition:background .15s,border-color .15s;display:inline-flex}.DoN7rq_switchThumb{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:14px;height:14px;transition:transform .15s,background .15s;display:block}.DoN7rq_switch:hover .DoN7rq_switchTrack{border-color:var(--dsw-alias-label-dimmed)}.DoN7rq_switchInput:checked+.DoN7rq_switchTrack{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill)}.DoN7rq_switchInput:checked+.DoN7rq_switchTrack .DoN7rq_switchThumb{background:var(--dsw-alias-bg-layer-3);transform:translate(16px)}.DoN7rq_switchInput:focus-visible+.DoN7rq_switchTrack{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.DoN7rq_control{flex:none;align-items:center;gap:6px;display:flex}.DoN7rq_percentInput{width:76px}.DoN7rq_typedInput{width:200px}.DoN7rq_typedInputNumber{width:76px}.DoN7rq_selectAnchor{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-width:220px;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:8px;align-items:center;gap:6px;padding:4px 8px;font-size:13px;line-height:20px;display:flex}.DoN7rq_selectAnchor:hover{border-color:var(--dsw-alias-label-dimmed)}.DoN7rq_selectAnchorIcon{flex:none;display:inline-flex}.DoN7rq_selectAnchorText{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.DoN7rq_selectOption{align-items:center;gap:10px;min-width:200px;display:flex}.DoN7rq_selectOptionIcon{color:var(--dsw-alias-label-secondary);flex:none;display:inline-flex}.DoN7rq_selectOptionText{flex-direction:column;min-width:0;display:flex}.DoN7rq_suffix{color:var(--dsw-alias-label-secondary);font-size:14px;line-height:22px}.DoN7rq_cssTextArea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);width:100%;min-height:120px;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,monospace);resize:vertical;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.6}.DoN7rq_cssTextArea:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.DoN7rq_popupDialog.DoN7rq_popupDialog{width:min(460px,100%)}.DoN7rq_popupRows{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2,transparent) transparent;flex-direction:column;gap:8px;width:100%;max-height:min(52vh,440px);padding-right:4px;display:flex;overflow:hidden auto}.DoN7rq_popupRows::-webkit-scrollbar{width:6px}.DoN7rq_popupRows::-webkit-scrollbar-thumb{background:var(--dsw-alias-scrollbar-bg-l2,var(--dsw-alias-border-l2));border-radius:3px}.DoN7rq_popupRows::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-scrollbar-hover-l2,var(--dsw-alias-label-dimmed))}.DoN7rq_popupRow{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;flex:none;justify-content:space-between;align-items:center;gap:16px;min-width:0;padding:12px 14px;transition:border-color .16s,background .16s;display:flex}.DoN7rq_popupRow:hover{border-color:var(--dsw-alias-label-dimmed)}.DoN7rq_done{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.DoN7rq_done:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.DoN7rq_error{color:var(--dsw-alias-state-error-primary);padding:10px 0 2px;font-size:12px;line-height:17px}.DoN7rq_pluginModal.DoN7rq_pluginModal{width:min(560px,100%)}.DoN7rq_pluginList{flex-direction:column;gap:12px;width:100%;display:flex}.DoN7rq_pluginTopicBtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);width:100%;font:inherit;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);cursor:pointer;border-radius:8px;padding:6px 12px;font-size:12px;line-height:18px}.DoN7rq_pluginTopicBtn:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.DoN7rq_pluginTopicBtn:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.DoN7rq_pluginEmpty{color:var(--dsw-alias-label-tertiary);padding:20px 2px;font-size:12px;line-height:18px}.DoN7rq_pluginEntry{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:12px;flex-direction:column;gap:4px;padding:12px;display:flex}.DoN7rq_pluginEntryHead{justify-content:space-between;align-items:center;gap:12px;display:flex}.DoN7rq_pluginEntryActions{flex:none;align-items:center;gap:6px;display:inline-flex}.DoN7rq_pluginJumpBtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);font:inherit;cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:8px;flex:none;padding:3px 12px;font-size:12px;line-height:1.5}.DoN7rq_pluginJumpBtn:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.DoN7rq_pluginJumpBtn:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.DoN7rq_pluginName{appearance:none;min-width:0;font:inherit;color:var(--dsw-alias-label-primary);text-align:left;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;background:0 0;border:0;padding:0;font-size:13px;font-weight:600;line-height:20px;text-decoration:none;overflow:hidden}.DoN7rq_pluginName:hover{color:var(--dsw-alias-button-primary-fill);text-decoration:underline}.DoN7rq_pluginDesc{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.DoN7rq_pluginInstall{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);white-space:nowrap;border-radius:8px;padding:6px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:16px;display:block;overflow-x:auto}.DoN7rq_pluginCopyBtn{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);border:1px solid #0000;border-radius:8px;flex:none;padding:3px 12px;font-size:12px;line-height:1.5}.DoN7rq_pluginCopyBtn:hover{background:var(--dsw-alias-button-primary-hover)}.DoN7rq_pluginCopyBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}@media (prefers-reduced-motion:reduce){.DoN7rq_card,.DoN7rq_cardSettings,.DoN7rq_cardSwitchTrack,.DoN7rq_cardSwitchThumb,.DoN7rq_rowGear,.DoN7rq_popupRow,.DoN7rq_switchTrack,.DoN7rq_switchThumb{transition:none}}.DoN7rq_versionBadge{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);border-radius:999px;align-self:flex-start;align-items:center;gap:8px;padding:4px 12px 4px 14px;font-size:12px;line-height:18px;display:inline-flex}.DoN7rq_versionBadgeName{color:var(--dsw-alias-label-primary);font-weight:600}.DoN7rq_versionBadgeTag{background:var(--dsw-alias-accent-soft,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;border-radius:999px;padding:1px 8px}.DoN7rq_pluginSearch{box-sizing:border-box;appearance:none;border:1px solid var(--dsw-alias-border-l2);width:100%;font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.DoN7rq_pluginSearch::placeholder{color:var(--dsw-alias-label-tertiary)}.DoN7rq_pluginSearch:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.DoN7rq_pluginEntries{flex-direction:column;gap:10px;max-height:46vh;padding-right:2px;display:flex;overflow:hidden auto}.DoN7rq_pluginGroup{flex-direction:column;gap:8px;display:flex}.DoN7rq_pluginGroupHeading{color:var(--dsw-alias-label-secondary);padding:2px 2px 0;font-size:12px;font-weight:600;line-height:18px}.DoN7rq_openWithEditorRow{grid-template-columns:1fr 1.5fr auto auto;align-items:center;gap:8px;min-width:0;display:grid}.DoN7rq_openWithEditorInput,.DoN7rq_openWithEditorTemplate{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;padding:5px 8px;font-size:13px;line-height:20px}.DoN7rq_openWithEditorInput:focus-visible,.DoN7rq_openWithEditorTemplate:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.DoN7rq_openWithFamily{color:var(--dsw-alias-label-secondary);white-space:nowrap;cursor:pointer;align-items:center;gap:5px;font-size:12px;display:inline-flex}.DoN7rq_openWithRemove{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:8px;justify-content:center;align-items:center;padding:4px;display:inline-flex}.DoN7rq_openWithRemove:hover{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-2)}.DoN7rq_openWithHint{color:var(--dsw-alias-state-error-primary);padding:0 2px;font-size:12px;line-height:17px}";
+		//#region \0dsh-css:/workspace/1/dsh/packages/dsh-sidebar-lite/src/client/SideCardSection.module.css.mjs
+		const css$3 = ".XhU_Pq_section{flex-direction:column;gap:16px;width:100%;max-width:760px;display:flex}.XhU_Pq_intro{color:var(--dsw-alias-label-tertiary);margin:0;padding:0 2px;font-size:13px;line-height:20px}.XhU_Pq_group{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:16px;flex-direction:column;flex:none;gap:8px;padding:20px;display:flex}.XhU_Pq_groupHeading{color:var(--dsw-alias-label-primary);align-items:baseline;gap:7px;padding:0 2px 6px;font-size:13px;font-weight:600;line-height:20px;display:flex}.XhU_Pq_count{background:var(--dsw-alias-accent-soft,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:16px}.XhU_Pq_grid{grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;display:grid}.XhU_Pq_card{border:1px solid var(--dsw-alias-border-l2);min-height:106px;font:inherit;color:inherit;cursor:pointer;background:0 0;border-radius:12px;flex-direction:column;transition:background .12s,border-color .12s;display:flex;position:relative;overflow:hidden}.XhU_Pq_card:not(.XhU_Pq_cardOn):hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-label-dimmed)}.XhU_Pq_cardOn{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 45%, transparent);background:var(--dsw-alias-interactive-bg-active)}.XhU_Pq_cardMain{border-radius:inherit;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;flex:1;gap:6px;padding:12px;display:flex}.XhU_Pq_cardMain:focus-visible,.XhU_Pq_cardSettings:focus-visible,.XhU_Pq_rowGear:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px}.XhU_Pq_cardTop{align-items:center;gap:8px;min-width:0;min-height:28px;display:flex}.XhU_Pq_cardIconChip{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);width:28px;height:28px;color:var(--dsw-alias-label-tertiary);border-radius:8px;flex:none;justify-content:center;align-items:center;display:inline-flex}.XhU_Pq_cardOn .XhU_Pq_cardIconChip{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 35%, transparent);background:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 12%, transparent);color:var(--dsw-alias-button-primary-fill)}.XhU_Pq_cardTitle{min-width:0;color:var(--dsw-alias-label-secondary);white-space:nowrap;text-overflow:ellipsis;flex:1;font-size:13px;font-weight:600;line-height:20px;overflow:hidden}.XhU_Pq_cardOn .XhU_Pq_cardTitle{color:var(--dsw-alias-label-primary)}.XhU_Pq_cardSwitch{flex:none;align-items:center;display:inline-flex}.XhU_Pq_cardSwitchTrack{box-sizing:border-box;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;align-items:center;width:30px;height:16px;padding:2px;transition:background .15s,border-color .15s;display:inline-flex}.XhU_Pq_cardSwitchThumb{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:10px;height:10px;transition:transform .15s,background .15s;display:block}.XhU_Pq_cardOn .XhU_Pq_cardSwitchTrack{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill)}.XhU_Pq_cardOn .XhU_Pq_cardSwitchThumb{background:var(--dsw-alias-bg-layer-3);transform:translate(14px)}.XhU_Pq_cardDesc{color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;font-size:11px;line-height:16px;overflow:hidden}.XhU_Pq_addCard{border-style:dashed;border-color:var(--dsw-alias-border-l2);text-align:left;align-items:flex-start;padding:12px}.XhU_Pq_addCard:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.XhU_Pq_addCard:hover .XhU_Pq_cardTitle{color:var(--dsw-alias-label-primary)}.XhU_Pq_addCard:hover .XhU_Pq_cardIconChip{border-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 35%, transparent);color:var(--dsw-alias-button-primary-fill)}.XhU_Pq_addCard:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px}.XhU_Pq_cardOn .XhU_Pq_cardDesc{color:var(--dsw-alias-label-secondary)}.XhU_Pq_cardSettings{border:0;border-top:1px solid var(--dsw-alias-border-l1);width:100%;color:var(--dsw-alias-label-secondary);font:inherit;text-align:left;cursor:pointer;background:0 0;align-items:center;gap:6px;padding:6px 12px;font-size:11px;font-weight:500;line-height:16px;transition:background .12s,color .12s;display:flex}.XhU_Pq_cardOn .XhU_Pq_cardSettings{border-top-color:color-mix(in srgb, var(--dsw-alias-button-primary-fill) 18%, transparent)}.XhU_Pq_cardSettings:hover{background:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-brand-primary)}.XhU_Pq_rowGear{border:1px solid var(--dsw-alias-border-l2);width:22px;height:22px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;transition:background .12s,border-color .12s,color .12s;display:inline-flex}.XhU_Pq_rowGear:hover{border-color:var(--dsw-alias-interactive-bg-hover-accent);background:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-brand-primary)}.XhU_Pq_row{border-bottom:1px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:center;gap:16px;padding:12px 2px;display:flex}.XhU_Pq_row:last-child{border-bottom:none}.XhU_Pq_rowText{flex-direction:column;gap:4px;min-width:0;display:flex}.XhU_Pq_title{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}.XhU_Pq_desc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.XhU_Pq_switch{cursor:pointer;flex:none;display:inline-flex;position:relative}.XhU_Pq_switchInput{opacity:0;width:1px;height:1px;margin:0;position:absolute}.XhU_Pq_switchTrack{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);border-radius:10px;align-items:center;width:36px;height:20px;padding:2px;transition:background .15s,border-color .15s;display:inline-flex}.XhU_Pq_switchThumb{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:14px;height:14px;transition:transform .15s,background .15s;display:block}.XhU_Pq_switch:hover .XhU_Pq_switchTrack{border-color:var(--dsw-alias-label-dimmed)}.XhU_Pq_switchInput:checked+.XhU_Pq_switchTrack{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill)}.XhU_Pq_switchInput:checked+.XhU_Pq_switchTrack .XhU_Pq_switchThumb{background:var(--dsw-alias-bg-layer-3);transform:translate(16px)}.XhU_Pq_switchInput:focus-visible+.XhU_Pq_switchTrack{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.XhU_Pq_control{flex:none;align-items:center;gap:6px;display:flex}.XhU_Pq_percentInput{width:76px}.XhU_Pq_typedInput{width:200px}.XhU_Pq_typedInputNumber{width:76px}.XhU_Pq_selectAnchor{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-width:220px;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:8px;align-items:center;gap:6px;padding:4px 8px;font-size:13px;line-height:20px;display:flex}.XhU_Pq_selectAnchor:hover{border-color:var(--dsw-alias-label-dimmed)}.XhU_Pq_selectAnchorIcon{flex:none;display:inline-flex}.XhU_Pq_selectAnchorText{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.XhU_Pq_selectOption{align-items:center;gap:10px;min-width:200px;display:flex}.XhU_Pq_selectOptionIcon{color:var(--dsw-alias-label-secondary);flex:none;display:inline-flex}.XhU_Pq_selectOptionText{flex-direction:column;min-width:0;display:flex}.XhU_Pq_suffix{color:var(--dsw-alias-label-secondary);font-size:14px;line-height:22px}.XhU_Pq_cssTextArea{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);width:100%;min-height:120px;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,monospace);resize:vertical;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.6}.XhU_Pq_cssTextArea:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.XhU_Pq_popupDialog.XhU_Pq_popupDialog{width:min(460px,100%)}.XhU_Pq_popupRows{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2,transparent) transparent;flex-direction:column;gap:8px;width:100%;max-height:min(52vh,440px);padding-right:4px;display:flex;overflow:hidden auto}.XhU_Pq_popupRows::-webkit-scrollbar{width:6px}.XhU_Pq_popupRows::-webkit-scrollbar-thumb{background:var(--dsw-alias-scrollbar-bg-l2,var(--dsw-alias-border-l2));border-radius:3px}.XhU_Pq_popupRows::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-scrollbar-hover-l2,var(--dsw-alias-label-dimmed))}.XhU_Pq_popupRow{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;flex:none;justify-content:space-between;align-items:center;gap:16px;min-width:0;padding:12px 14px;transition:border-color .16s,background .16s;display:flex}.XhU_Pq_popupRow:hover{border-color:var(--dsw-alias-label-dimmed)}.XhU_Pq_done{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.XhU_Pq_done:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.XhU_Pq_error{color:var(--dsw-alias-state-error-primary);padding:10px 0 2px;font-size:12px;line-height:17px}.XhU_Pq_pluginModal.XhU_Pq_pluginModal{width:min(560px,100%)}.XhU_Pq_pluginList{flex-direction:column;gap:12px;width:100%;display:flex}.XhU_Pq_pluginTopicBtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);width:100%;font:inherit;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);cursor:pointer;border-radius:8px;padding:6px 12px;font-size:12px;line-height:18px}.XhU_Pq_pluginTopicBtn:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.XhU_Pq_pluginTopicBtn:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.XhU_Pq_pluginEmpty{color:var(--dsw-alias-label-tertiary);padding:20px 2px;font-size:12px;line-height:18px}.XhU_Pq_pluginEntry{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:12px;flex-direction:column;gap:4px;padding:12px;display:flex}.XhU_Pq_pluginEntryHead{justify-content:space-between;align-items:center;gap:12px;display:flex}.XhU_Pq_pluginEntryActions{flex:none;align-items:center;gap:6px;display:inline-flex}.XhU_Pq_pluginJumpBtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);font:inherit;cursor:pointer;color:var(--dsw-alias-label-secondary);background:0 0;border-radius:8px;flex:none;padding:3px 12px;font-size:12px;line-height:1.5}.XhU_Pq_pluginJumpBtn:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}.XhU_Pq_pluginJumpBtn:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.XhU_Pq_pluginName{appearance:none;min-width:0;font:inherit;color:var(--dsw-alias-label-primary);text-align:left;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;background:0 0;border:0;padding:0;font-size:13px;font-weight:600;line-height:20px;text-decoration:none;overflow:hidden}.XhU_Pq_pluginName:hover{color:var(--dsw-alias-button-primary-fill);text-decoration:underline}.XhU_Pq_pluginDesc{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.XhU_Pq_pluginInstall{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);white-space:nowrap;border-radius:8px;padding:6px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:16px;display:block;overflow-x:auto}.XhU_Pq_pluginCopyBtn{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);border:1px solid #0000;border-radius:8px;flex:none;padding:3px 12px;font-size:12px;line-height:1.5}.XhU_Pq_pluginCopyBtn:hover{background:var(--dsw-alias-button-primary-hover)}.XhU_Pq_pluginCopyBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}@media (prefers-reduced-motion:reduce){.XhU_Pq_card,.XhU_Pq_cardSettings,.XhU_Pq_cardSwitchTrack,.XhU_Pq_cardSwitchThumb,.XhU_Pq_rowGear,.XhU_Pq_popupRow,.XhU_Pq_switchTrack,.XhU_Pq_switchThumb{transition:none}}.XhU_Pq_versionBadge{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);border-radius:999px;align-self:flex-start;align-items:center;gap:8px;padding:4px 12px 4px 14px;font-size:12px;line-height:18px;display:inline-flex}.XhU_Pq_versionBadgeName{color:var(--dsw-alias-label-primary);font-weight:600}.XhU_Pq_versionBadgeTag{background:var(--dsw-alias-accent-soft,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;border-radius:999px;padding:1px 8px}.XhU_Pq_pluginSearch{box-sizing:border-box;appearance:none;border:1px solid var(--dsw-alias-border-l2);width:100%;font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.XhU_Pq_pluginSearch::placeholder{color:var(--dsw-alias-label-tertiary)}.XhU_Pq_pluginSearch:focus-visible{outline:2px solid var(--dsw-alias-border-l4);outline-offset:1px}.XhU_Pq_pluginEntries{flex-direction:column;gap:10px;max-height:46vh;padding-right:2px;display:flex;overflow:hidden auto}.XhU_Pq_pluginGroup{flex-direction:column;gap:8px;display:flex}.XhU_Pq_pluginGroupHeading{color:var(--dsw-alias-label-secondary);padding:2px 2px 0;font-size:12px;font-weight:600;line-height:18px}.XhU_Pq_openWithEditorRow{grid-template-columns:1fr 1.5fr auto auto;align-items:center;gap:8px;min-width:0;display:grid}.XhU_Pq_openWithEditorInput,.XhU_Pq_openWithEditorTemplate{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;padding:5px 8px;font-size:13px;line-height:20px}.XhU_Pq_openWithEditorInput:focus-visible,.XhU_Pq_openWithEditorTemplate:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.XhU_Pq_openWithFamily{color:var(--dsw-alias-label-secondary);white-space:nowrap;cursor:pointer;align-items:center;gap:5px;font-size:12px;display:inline-flex}.XhU_Pq_openWithRemove{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:8px;justify-content:center;align-items:center;padding:4px;display:inline-flex}.XhU_Pq_openWithRemove:hover{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-2)}.XhU_Pq_openWithHint{color:var(--dsw-alias-state-error-primary);padding:0 2px;font-size:12px;line-height:17px}";
 		const tagId$3 = "dsh-external/dsh-sidebar-lite/SideCardSection.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
 			const tag = document.createElement("style");
@@ -13164,75 +12926,75 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var SideCardSection_module_css_default = {
-			"pluginEntryHead": "DoN7rq_pluginEntryHead",
-			"group": "DoN7rq_group",
-			"rowText": "DoN7rq_rowText",
-			"selectOption": "DoN7rq_selectOption",
-			"switchInput": "DoN7rq_switchInput",
-			"cardSwitchThumb": "DoN7rq_cardSwitchThumb",
-			"done": "DoN7rq_done",
-			"cardSwitch": "DoN7rq_cardSwitch",
-			"selectAnchorText": "DoN7rq_selectAnchorText",
-			"openWithFamily": "DoN7rq_openWithFamily",
-			"pluginCopyBtn": "DoN7rq_pluginCopyBtn",
-			"switchTrack": "DoN7rq_switchTrack",
-			"card": "DoN7rq_card",
-			"selectOptionText": "DoN7rq_selectOptionText",
-			"cardMain": "DoN7rq_cardMain",
-			"popupRow": "DoN7rq_popupRow",
-			"versionBadge": "DoN7rq_versionBadge",
-			"title": "DoN7rq_title",
-			"typedInput": "DoN7rq_typedInput",
-			"error": "DoN7rq_error",
-			"groupHeading": "DoN7rq_groupHeading",
-			"addCard": "DoN7rq_addCard",
-			"selectOptionIcon": "DoN7rq_selectOptionIcon",
-			"pluginEmpty": "DoN7rq_pluginEmpty",
-			"switchThumb": "DoN7rq_switchThumb",
-			"pluginEntries": "DoN7rq_pluginEntries",
-			"openWithRemove": "DoN7rq_openWithRemove",
-			"cardTitle": "DoN7rq_cardTitle",
-			"cardSwitchTrack": "DoN7rq_cardSwitchTrack",
-			"openWithEditorInput": "DoN7rq_openWithEditorInput",
-			"suffix": "DoN7rq_suffix",
-			"openWithEditorTemplate": "DoN7rq_openWithEditorTemplate",
-			"desc": "DoN7rq_desc",
-			"openWithEditorRow": "DoN7rq_openWithEditorRow",
-			"cssTextArea": "DoN7rq_cssTextArea",
-			"pluginSearch": "DoN7rq_pluginSearch",
-			"popupRows": "DoN7rq_popupRows",
-			"rowGear": "DoN7rq_rowGear",
-			"selectAnchorIcon": "DoN7rq_selectAnchorIcon",
-			"typedInputNumber": "DoN7rq_typedInputNumber",
-			"percentInput": "DoN7rq_percentInput",
-			"cardTop": "DoN7rq_cardTop",
-			"pluginModal": "DoN7rq_pluginModal",
-			"cardSettings": "DoN7rq_cardSettings",
-			"pluginName": "DoN7rq_pluginName",
-			"pluginInstall": "DoN7rq_pluginInstall",
-			"selectAnchor": "DoN7rq_selectAnchor",
-			"pluginDesc": "DoN7rq_pluginDesc",
-			"pluginJumpBtn": "DoN7rq_pluginJumpBtn",
-			"pluginList": "DoN7rq_pluginList",
-			"switch": "DoN7rq_switch",
-			"intro": "DoN7rq_intro",
-			"section": "DoN7rq_section",
-			"count": "DoN7rq_count",
-			"pluginGroupHeading": "DoN7rq_pluginGroupHeading",
-			"pluginTopicBtn": "DoN7rq_pluginTopicBtn",
-			"cardOn": "DoN7rq_cardOn",
-			"openWithHint": "DoN7rq_openWithHint",
-			"grid": "DoN7rq_grid",
-			"cardIconChip": "DoN7rq_cardIconChip",
-			"pluginEntryActions": "DoN7rq_pluginEntryActions",
-			"row": "DoN7rq_row",
-			"cardDesc": "DoN7rq_cardDesc",
-			"pluginEntry": "DoN7rq_pluginEntry",
-			"versionBadgeName": "DoN7rq_versionBadgeName",
-			"versionBadgeTag": "DoN7rq_versionBadgeTag",
-			"pluginGroup": "DoN7rq_pluginGroup",
-			"popupDialog": "DoN7rq_popupDialog",
-			"control": "DoN7rq_control"
+			"group": "XhU_Pq_group",
+			"count": "XhU_Pq_count",
+			"popupDialog": "XhU_Pq_popupDialog",
+			"pluginModal": "XhU_Pq_pluginModal",
+			"addCard": "XhU_Pq_addCard",
+			"pluginJumpBtn": "XhU_Pq_pluginJumpBtn",
+			"pluginDesc": "XhU_Pq_pluginDesc",
+			"rowGear": "XhU_Pq_rowGear",
+			"openWithEditorTemplate": "XhU_Pq_openWithEditorTemplate",
+			"versionBadgeName": "XhU_Pq_versionBadgeName",
+			"pluginGroup": "XhU_Pq_pluginGroup",
+			"typedInput": "XhU_Pq_typedInput",
+			"cardSwitch": "XhU_Pq_cardSwitch",
+			"pluginList": "XhU_Pq_pluginList",
+			"cardDesc": "XhU_Pq_cardDesc",
+			"grid": "XhU_Pq_grid",
+			"pluginCopyBtn": "XhU_Pq_pluginCopyBtn",
+			"desc": "XhU_Pq_desc",
+			"cssTextArea": "XhU_Pq_cssTextArea",
+			"done": "XhU_Pq_done",
+			"cardMain": "XhU_Pq_cardMain",
+			"openWithEditorRow": "XhU_Pq_openWithEditorRow",
+			"pluginEntries": "XhU_Pq_pluginEntries",
+			"pluginSearch": "XhU_Pq_pluginSearch",
+			"title": "XhU_Pq_title",
+			"openWithFamily": "XhU_Pq_openWithFamily",
+			"popupRows": "XhU_Pq_popupRows",
+			"card": "XhU_Pq_card",
+			"cardSwitchTrack": "XhU_Pq_cardSwitchTrack",
+			"pluginEntryHead": "XhU_Pq_pluginEntryHead",
+			"cardSwitchThumb": "XhU_Pq_cardSwitchThumb",
+			"switchInput": "XhU_Pq_switchInput",
+			"selectAnchorIcon": "XhU_Pq_selectAnchorIcon",
+			"pluginInstall": "XhU_Pq_pluginInstall",
+			"intro": "XhU_Pq_intro",
+			"pluginEntryActions": "XhU_Pq_pluginEntryActions",
+			"pluginGroupHeading": "XhU_Pq_pluginGroupHeading",
+			"openWithEditorInput": "XhU_Pq_openWithEditorInput",
+			"cardSettings": "XhU_Pq_cardSettings",
+			"cardTop": "XhU_Pq_cardTop",
+			"cardOn": "XhU_Pq_cardOn",
+			"pluginTopicBtn": "XhU_Pq_pluginTopicBtn",
+			"pluginName": "XhU_Pq_pluginName",
+			"section": "XhU_Pq_section",
+			"cardIconChip": "XhU_Pq_cardIconChip",
+			"switch": "XhU_Pq_switch",
+			"selectOptionText": "XhU_Pq_selectOptionText",
+			"typedInputNumber": "XhU_Pq_typedInputNumber",
+			"versionBadgeTag": "XhU_Pq_versionBadgeTag",
+			"control": "XhU_Pq_control",
+			"percentInput": "XhU_Pq_percentInput",
+			"error": "XhU_Pq_error",
+			"selectOption": "XhU_Pq_selectOption",
+			"switchThumb": "XhU_Pq_switchThumb",
+			"switchTrack": "XhU_Pq_switchTrack",
+			"suffix": "XhU_Pq_suffix",
+			"openWithRemove": "XhU_Pq_openWithRemove",
+			"cardTitle": "XhU_Pq_cardTitle",
+			"selectAnchor": "XhU_Pq_selectAnchor",
+			"pluginEntry": "XhU_Pq_pluginEntry",
+			"selectAnchorText": "XhU_Pq_selectAnchorText",
+			"popupRow": "XhU_Pq_popupRow",
+			"versionBadge": "XhU_Pq_versionBadge",
+			"groupHeading": "XhU_Pq_groupHeading",
+			"row": "XhU_Pq_row",
+			"selectOptionIcon": "XhU_Pq_selectOptionIcon",
+			"pluginEmpty": "XhU_Pq_pluginEmpty",
+			"rowText": "XhU_Pq_rowText",
+			"openWithHint": "XhU_Pq_openWithHint"
 		};
 		//#endregion
 		//#region src/client/open-with-settings.tsx
@@ -13371,7 +13133,7 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									removeCustom(editor.id);
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutline16, { size: 14 })
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutlineRegular, { size: 14 })
 							})
 						]
 					}, editor.id)),
@@ -13852,7 +13614,7 @@ window.__ModuleLoader__.load({
 						onClick: () => {
 							stageEntry(entry, staged);
 						},
-						children: staged ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, {}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutline16, {})
+						children: staged ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, {}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutlineRegular, {})
 					})]
 				}, `${staged ? "s" : "u"}:${entry.path}`);
 			};
@@ -13924,7 +13686,7 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									refresh();
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline16, { size: 14 })
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 })
 							})
 						]
 					}),
@@ -14095,21 +13857,21 @@ window.__ModuleLoader__.load({
 								...fileMenu !== null && isWithinWorkspace(scope.cwd ?? "", resolveSidebarPath(repoRoot ?? selectedWorktree ?? scope.cwd, fileMenu.entry.path)) ? [{
 									id: "open",
 									label: t("openEditor"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutlineRegular, { size: 14 })
 								}] : [],
 								fileMenu?.staged === true ? {
 									id: "stage",
 									label: t("unstage"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 14 })
 								} : {
 									id: "stage",
 									label: t("stage"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutlineRegular, { size: 14 })
 								},
 								...fileMenu !== null && !isUntracked(fileMenu.entry) ? [{
 									id: "discard",
 									label: t("discard"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, { size: 14 }),
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 14 }),
 									danger: true
 								}] : [],
 								{
@@ -14119,12 +13881,12 @@ window.__ModuleLoader__.load({
 								{
 									id: "relative",
 									label: t("copyRelative"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 14 })
 								},
 								{
 									id: "absolute",
 									label: t("copyAbsolute"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 14 })
 								}
 							],
 							onSelect: (id) => {
@@ -14174,17 +13936,17 @@ window.__ModuleLoader__.load({
 								{
 									id: "copyShort",
 									label: t("copyShortHash"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 14 })
 								},
 								{
 									id: "copyFull",
 									label: t("copyFullHash"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 14 })
 								},
 								{
 									id: "copySubject",
 									label: t("copySubject"),
-									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutline16, { size: 14 })
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCopyOutlineRegular, { size: 14 })
 								},
 								{
 									type: "separator",
@@ -14700,7 +14462,7 @@ window.__ModuleLoader__.load({
 							"aria-label": t("refresh"),
 							title: t("refresh"),
 							onClick: refresh,
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline16, { size: 14 })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 })
 						})]
 					}),
 					loading && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -14821,12 +14583,6 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 		function isSideThreadSummary(summary) {
 			return summary.origin === "subagent" && summary.displayTitle.startsWith("Side: ");
 		}
-		/** Count the direct subagent children of one session (durable `origin` rows). */
-		function directSubagentCount(byId, sessionId) {
-			let count = 0;
-			for (const summary of Object.values(byId)) if (summary.origin === "subagent" && summary.parentId === sessionId && !isSideThreadSummary(summary)) count += 1;
-			return count;
-		}
 		/**
 		* The main agent of the current session's tree: walk the durable parent
 		* chain upward until the first non-subagent session. The Subagent page shows
@@ -14862,15 +14618,6 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			};
 			if (rootId !== void 0) visit(rootId);
 			return out;
-		}
-		/**
-		* Whether a new direct subagent appeared under `sessionId` between two
-		* consecutive list snapshots (the count crossed 0 → >0). Switching to a
-		* session that already has subagents yields `false` (its baseline starts at
-		* the current count), so the auto-open never fights an existing layout.
-		*/
-		function detectNewDirectSubagent(prev, next, sessionId) {
-			return directSubagentCount(prev.byId, sessionId) === 0 && directSubagentCount(next.byId, sessionId) > 0;
 		}
 		/**
 		* Index every subagent descendant under each ancestor it reaches through an
@@ -14930,18 +14677,6 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				if (reachesRoot) ids.add(summary.id);
 			}
 			return ids;
-		}
-		/**
-		* Whether a NEW background job appeared for one session between two
-		* consecutive list snapshots (a job id the previous snapshot lacked).
-		* Unlike the subagent auto-open (0 → N only), ANY new job id triggers: the
-		* agent may start several jobs over a session, and each new one should
-		* surface the Jobs page (a fresh page load never triggers — its baseline
-		* starts at the current snapshot).
-		*/
-		function detectNewJob(prev, next, sessionId) {
-			const prevIds = new Set((prev.jobsBySession?.[sessionId] ?? []).map((job) => job.id));
-			return (next.jobsBySession?.[sessionId] ?? []).some((job) => !prevIds.has(job.id));
 		}
 		/**
 		* Collect the background jobs of the whole current tree, owner-labeled.
@@ -15022,8 +14757,8 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			return t("jobDurationSeconds", { seconds });
 		}
 		//#endregion
-		//#region \0dsh-css:K:\work\project\dsh\dsh-sidebar-lite\src\client\SubagentView.module.css.mjs
-		const css$2 = ".V0oeya_subagent{flex-direction:column;flex:1;min-height:0;display:flex}.V0oeya_subagentHeader{flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}.V0oeya_subagentTitle{min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.V0oeya_subagentCount{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.V0oeya_subagentRefresh{width:24px;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;display:inline-flex}.V0oeya_subagentRefresh:hover{background:var(--dsw-alias-interactive-bg-hover)}.V0oeya_subagentBody{flex:1;min-height:0;padding:2px 6px 8px;overflow-y:auto}.V0oeya_subagentRow{box-sizing:border-box;width:100%;min-height:50px;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;outline:none;align-items:flex-start;gap:8px;padding:7px 8px 7px 11px;display:flex;position:relative}.V0oeya_subagentRow:hover,.V0oeya_subagentRow:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}.V0oeya_subagentRowActive,.V0oeya_subagentRowActive:hover,.V0oeya_subagentRowActive:focus-visible{background:var(--dsw-alias-interactive-bg-active)}.V0oeya_subagentRowDisabled{color:var(--dsw-alias-label-dimmed);cursor:not-allowed}.V0oeya_subagentRowDisabled:hover{background:0 0}.V0oeya_subagentRowLoading{cursor:default}.V0oeya_subagentDot{margin-top:4px}.V0oeya_subagentContent{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.V0oeya_subagentLabel,.V0oeya_subagentSecondary{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.V0oeya_subagentLabel{color:inherit;font-weight:400}.V0oeya_subagentSecondary{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}.V0oeya_subagentLive{min-width:0;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);align-items:baseline;gap:4px;display:flex;overflow:hidden}.V0oeya_subagentLiveTool{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);flex:none}.V0oeya_subagentLiveArgs{min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.V0oeya_subagentLiveText{-webkit-line-clamp:2;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-secondary);-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.V0oeya_subagentNode{min-width:0;position:relative}.V0oeya_subagentChildren{margin-left:18px;padding-left:4px;position:relative}.V0oeya_subagentChildren:before{content:\"\";border-left:1px solid var(--dsw-alias-border-l2);height:26px;position:absolute;top:-26px;left:0}.V0oeya_subagentChildren[aria-busy=true]:before{content:none}.V0oeya_subagentChildren>.V0oeya_subagentNode:before{content:\"\";border-left:1px solid var(--dsw-alias-border-l2);position:absolute;top:0;bottom:0;left:-4px}.V0oeya_subagentChildren>.V0oeya_subagentNode:last-child:before{height:17px;bottom:auto}.V0oeya_subagentChildren>.V0oeya_subagentNode>.V0oeya_subagentRow:before{content:\"\";border-top:1px solid var(--dsw-alias-border-l2);width:14px;position:absolute;top:16px;left:-4px}.V0oeya_subagentEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;flex-direction:column;gap:2px;padding:16px;display:flex}.V0oeya_subagentEmptyHint{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-dimmed)}.V0oeya_subagentError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;display:flex}.V0oeya_subagentErrorRetry{height:24px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;align-items:center;gap:4px;padding:0 8px;display:inline-flex}.V0oeya_subagentErrorRetry:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.V0oeya_jobs{border-top:1px solid var(--dsw-alias-border-l2);margin-top:10px;padding-top:8px}.V0oeya_jobsHeader{align-items:center;gap:8px;height:26px;padding:0 2px;display:flex}.V0oeya_jobsTitle{min-width:0;font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.V0oeya_jobsCount{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.V0oeya_jobsList{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}.V0oeya_jobsRow{border-radius:8px;align-items:center;gap:4px;display:flex}.V0oeya_jobsRow:hover{background:var(--dsw-alias-interactive-bg-hover)}.V0oeya_jobsRowSettled{opacity:.8}.V0oeya_jobsRowSelected,.V0oeya_jobsRowSelected:hover{background:var(--dsw-alias-interactive-bg-active)}.V0oeya_jobsRowMain{min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;outline:none;flex:1;align-items:flex-start;gap:8px;padding:6px 8px 6px 11px;display:flex}.V0oeya_jobsRowMain:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}.V0oeya_jobsDot{margin-top:5px}.V0oeya_jobsContent{flex-direction:column;gap:1px;min-width:0;display:flex}.V0oeya_jobsLabelLine{align-items:center;gap:6px;min-width:0;display:flex}.V0oeya_jobsKind{text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);max-width:90px;font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary);border-radius:4px;flex:none;padding:0 5px;line-height:14px;overflow:hidden}.V0oeya_jobsLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.V0oeya_jobsSecondary{text-overflow:ellipsis;white-space:nowrap;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);overflow:hidden}.V0oeya_jobsKill{width:22px;height:22px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;margin-right:4px;display:inline-flex}.V0oeya_jobsKill:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);color:var(--dsw-alias-state-error-primary)}.V0oeya_jobsKillArmed,.V0oeya_jobsKillArmed:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);width:auto;height:20px;color:var(--dsw-alias-state-error-primary);font:var(--dsw-font-xxxs-strong-11);white-space:nowrap;padding:0 8px}.V0oeya_jobsKill:disabled{opacity:.5;cursor:default}.V0oeya_jobsKillError{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-error-primary);flex:none;margin-right:4px}.V0oeya_jobsPane{z-index:1;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);border-radius:8px;margin-top:4px;position:sticky;bottom:0;overflow:hidden;box-shadow:0 -6px 12px -8px #00000059}.V0oeya_jobsPaneHeader{border-bottom:1px solid var(--dsw-alias-border-l1);align-items:center;gap:6px;height:28px;padding:0 4px 0 10px;display:flex}.V0oeya_jobsPaneDot{flex:none}.V0oeya_jobsPaneLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}.V0oeya_jobsPaneStatus{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}.V0oeya_jobsPaneClose{width:20px;height:20px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:5px;flex:none;justify-content:center;align-items:center;display:inline-flex}.V0oeya_jobsPaneClose:hover{background:var(--dsw-alias-interactive-bg-hover)}.V0oeya_jobsPanePre{max-height:200px;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word;margin:0;padding:6px 10px;line-height:1.5;overflow:auto}.V0oeya_jobsPaneHint{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);padding:8px 10px}.V0oeya_jobsPaneError{color:var(--dsw-alias-state-error-primary)}";
+		//#region \0dsh-css:/workspace/1/dsh/packages/dsh-sidebar-lite/src/client/SubagentView.module.css.mjs
+		const css$2 = "._6_gI5G_subagent{flex-direction:column;flex:1;min-height:0;display:flex}._6_gI5G_subagentHeader{flex:none;align-items:center;gap:8px;height:36px;padding:0 8px 0 12px;display:flex}._6_gI5G_subagentTitle{min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}._6_gI5G_subagentCount{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}._6_gI5G_subagentRefresh{width:24px;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;display:inline-flex}._6_gI5G_subagentRefresh:hover{background:var(--dsw-alias-interactive-bg-hover)}._6_gI5G_subagentBody{flex:1;min-height:0;padding:2px 6px 8px;overflow-y:auto}._6_gI5G_subagentRow{box-sizing:border-box;width:100%;min-height:50px;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;outline:none;align-items:flex-start;gap:8px;padding:7px 8px 7px 11px;display:flex;position:relative}._6_gI5G_subagentRow:hover,._6_gI5G_subagentRow:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}._6_gI5G_subagentRowActive,._6_gI5G_subagentRowActive:hover,._6_gI5G_subagentRowActive:focus-visible{background:var(--dsw-alias-interactive-bg-active)}._6_gI5G_subagentRowDisabled{color:var(--dsw-alias-label-dimmed);cursor:not-allowed}._6_gI5G_subagentRowDisabled:hover{background:0 0}._6_gI5G_subagentRowLoading{cursor:default}._6_gI5G_subagentDot{margin-top:4px}._6_gI5G_subagentContent{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}._6_gI5G_subagentLabel,._6_gI5G_subagentSecondary{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}._6_gI5G_subagentLabel{color:inherit;font-weight:400}._6_gI5G_subagentSecondary{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary)}._6_gI5G_subagentLive{min-width:0;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);align-items:baseline;gap:4px;display:flex;overflow:hidden}._6_gI5G_subagentLiveTool{font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);flex:none}._6_gI5G_subagentLiveArgs{min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}._6_gI5G_subagentLiveText{-webkit-line-clamp:2;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-secondary);-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}._6_gI5G_subagentNode{min-width:0;position:relative}._6_gI5G_subagentChildren{margin-left:18px;padding-left:4px;position:relative}._6_gI5G_subagentChildren:before{content:\"\";border-left:1px solid var(--dsw-alias-border-l2);height:26px;position:absolute;top:-26px;left:0}._6_gI5G_subagentChildren[aria-busy=true]:before{content:none}._6_gI5G_subagentChildren>._6_gI5G_subagentNode:before{content:\"\";border-left:1px solid var(--dsw-alias-border-l2);position:absolute;top:0;bottom:0;left:-4px}._6_gI5G_subagentChildren>._6_gI5G_subagentNode:last-child:before{height:17px;bottom:auto}._6_gI5G_subagentChildren>._6_gI5G_subagentNode>._6_gI5G_subagentRow:before{content:\"\";border-top:1px solid var(--dsw-alias-border-l2);width:14px;position:absolute;top:16px;left:-4px}._6_gI5G_subagentEmpty{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-align:center;flex-direction:column;gap:2px;padding:16px;display:flex}._6_gI5G_subagentEmptyHint{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-dimmed)}._6_gI5G_subagentError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;display:flex}._6_gI5G_subagentErrorRetry{height:24px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxxs-strong-11);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;align-items:center;gap:4px;padding:0 8px;display:inline-flex}._6_gI5G_subagentErrorRetry:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._6_gI5G_jobs{border-top:1px solid var(--dsw-alias-border-l2);margin-top:10px;padding-top:8px}._6_gI5G_jobsHeader{align-items:center;gap:8px;height:26px;padding:0 2px;display:flex}._6_gI5G_jobsTitle{min-width:0;font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}._6_gI5G_jobsCount{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}._6_gI5G_jobsList{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}._6_gI5G_jobsRow{border-radius:8px;align-items:center;gap:4px;display:flex}._6_gI5G_jobsRow:hover{background:var(--dsw-alias-interactive-bg-hover)}._6_gI5G_jobsRowSettled{opacity:.8}._6_gI5G_jobsRowSelected,._6_gI5G_jobsRowSelected:hover{background:var(--dsw-alias-interactive-bg-active)}._6_gI5G_jobsRowMain{min-width:0;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;outline:none;flex:1;align-items:flex-start;gap:8px;padding:6px 8px 6px 11px;display:flex}._6_gI5G_jobsRowMain:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}._6_gI5G_jobsDot{margin-top:5px}._6_gI5G_jobsContent{flex-direction:column;gap:1px;min-width:0;display:flex}._6_gI5G_jobsLabelLine{align-items:center;gap:6px;min-width:0;display:flex}._6_gI5G_jobsKind{text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);max-width:90px;font:var(--dsw-font-xxxs-strong-11);color:var(--dsw-alias-label-tertiary);border-radius:4px;flex:none;padding:0 5px;line-height:14px;overflow:hidden}._6_gI5G_jobsLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}._6_gI5G_jobsSecondary{text-overflow:ellipsis;white-space:nowrap;font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);overflow:hidden}._6_gI5G_jobsKill{width:22px;height:22px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;margin-right:4px;display:inline-flex}._6_gI5G_jobsKill:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);color:var(--dsw-alias-state-error-primary)}._6_gI5G_jobsKillArmed,._6_gI5G_jobsKillArmed:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);width:auto;height:20px;color:var(--dsw-alias-state-error-primary);font:var(--dsw-font-xxxs-strong-11);white-space:nowrap;padding:0 8px}._6_gI5G_jobsKill:disabled{opacity:.5;cursor:default}._6_gI5G_jobsKillError{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-state-error-primary);flex:none;margin-right:4px}._6_gI5G_jobsPane{z-index:1;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);border-radius:8px;margin-top:4px;position:sticky;bottom:0;overflow:hidden;box-shadow:0 -6px 12px -8px #00000059}._6_gI5G_jobsPaneHeader{border-bottom:1px solid var(--dsw-alias-border-l1);align-items:center;gap:6px;height:28px;padding:0 4px 0 10px;display:flex}._6_gI5G_jobsPaneDot{flex:none}._6_gI5G_jobsPaneLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);line-height:var(--dsw-font-xxxs-11-line-height);color:var(--dsw-alias-label-primary);flex:1;overflow:hidden}._6_gI5G_jobsPaneStatus{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);flex:none}._6_gI5G_jobsPaneClose{width:20px;height:20px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:5px;flex:none;justify-content:center;align-items:center;display:inline-flex}._6_gI5G_jobsPaneClose:hover{background:var(--dsw-alias-interactive-bg-hover)}._6_gI5G_jobsPanePre{max-height:200px;font-family:var(--ds-font-family-code);font-size:var(--dsw-font-xxxs-11-font-size);color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word;margin:0;padding:6px 10px;line-height:1.5;overflow:auto}._6_gI5G_jobsPaneHint{font:var(--dsw-font-xxxs-11);color:var(--dsw-alias-label-tertiary);padding:8px 10px}._6_gI5G_jobsPaneError{color:var(--dsw-alias-state-error-primary)}";
 		const tagId$2 = "dsh-external/dsh-sidebar-lite/SubagentView.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
 			const tag = document.createElement("style");
@@ -15033,57 +14768,57 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			document.head.appendChild(tag);
 		}
 		var SubagentView_module_css_default = {
-			"jobsPaneStatus": "V0oeya_jobsPaneStatus",
-			"subagentRowDisabled": "V0oeya_subagentRowDisabled",
-			"subagent": "V0oeya_subagent",
-			"subagentRowActive": "V0oeya_subagentRowActive",
-			"subagentLabel": "V0oeya_subagentLabel",
-			"subagentLiveTool": "V0oeya_subagentLiveTool",
-			"subagentEmptyHint": "V0oeya_subagentEmptyHint",
-			"jobsTitle": "V0oeya_jobsTitle",
-			"jobsRowSettled": "V0oeya_jobsRowSettled",
-			"subagentContent": "V0oeya_subagentContent",
-			"jobsSecondary": "V0oeya_jobsSecondary",
-			"subagentEmpty": "V0oeya_subagentEmpty",
-			"subagentChildren": "V0oeya_subagentChildren",
-			"subagentError": "V0oeya_subagentError",
-			"jobsKillError": "V0oeya_jobsKillError",
-			"subagentRowLoading": "V0oeya_subagentRowLoading",
-			"jobsKill": "V0oeya_jobsKill",
-			"jobsPane": "V0oeya_jobsPane",
-			"jobsPaneClose": "V0oeya_jobsPaneClose",
-			"subagentLiveText": "V0oeya_subagentLiveText",
-			"jobsDot": "V0oeya_jobsDot",
-			"jobsHeader": "V0oeya_jobsHeader",
-			"jobsRowSelected": "V0oeya_jobsRowSelected",
-			"jobsContent": "V0oeya_jobsContent",
-			"jobsLabel": "V0oeya_jobsLabel",
-			"jobsKillArmed": "V0oeya_jobsKillArmed",
-			"jobsPaneError": "V0oeya_jobsPaneError",
-			"jobsKind": "V0oeya_jobsKind",
-			"subagentNode": "V0oeya_subagentNode",
-			"jobsPaneHeader": "V0oeya_jobsPaneHeader",
-			"jobsPanePre": "V0oeya_jobsPanePre",
-			"subagentTitle": "V0oeya_subagentTitle",
-			"subagentBody": "V0oeya_subagentBody",
-			"subagentDot": "V0oeya_subagentDot",
-			"subagentLive": "V0oeya_subagentLive",
-			"subagentCount": "V0oeya_subagentCount",
-			"subagentLiveArgs": "V0oeya_subagentLiveArgs",
-			"jobs": "V0oeya_jobs",
-			"jobsPaneDot": "V0oeya_jobsPaneDot",
-			"jobsPaneHint": "V0oeya_jobsPaneHint",
-			"subagentRow": "V0oeya_subagentRow",
-			"subagentHeader": "V0oeya_subagentHeader",
-			"jobsList": "V0oeya_jobsList",
-			"jobsLabelLine": "V0oeya_jobsLabelLine",
-			"jobsPaneLabel": "V0oeya_jobsPaneLabel",
-			"jobsRowMain": "V0oeya_jobsRowMain",
-			"subagentRefresh": "V0oeya_subagentRefresh",
-			"jobsCount": "V0oeya_jobsCount",
-			"jobsRow": "V0oeya_jobsRow",
-			"subagentSecondary": "V0oeya_subagentSecondary",
-			"subagentErrorRetry": "V0oeya_subagentErrorRetry"
+			"subagentErrorRetry": "_6_gI5G_subagentErrorRetry",
+			"subagentSecondary": "_6_gI5G_subagentSecondary",
+			"jobsLabelLine": "_6_gI5G_jobsLabelLine",
+			"subagentBody": "_6_gI5G_subagentBody",
+			"jobsRowSettled": "_6_gI5G_jobsRowSettled",
+			"jobsDot": "_6_gI5G_jobsDot",
+			"subagent": "_6_gI5G_subagent",
+			"subagentCount": "_6_gI5G_subagentCount",
+			"jobsPaneHeader": "_6_gI5G_jobsPaneHeader",
+			"jobsList": "_6_gI5G_jobsList",
+			"jobsPaneClose": "_6_gI5G_jobsPaneClose",
+			"subagentRefresh": "_6_gI5G_subagentRefresh",
+			"subagentEmpty": "_6_gI5G_subagentEmpty",
+			"subagentRowDisabled": "_6_gI5G_subagentRowDisabled",
+			"jobsRowMain": "_6_gI5G_jobsRowMain",
+			"jobsKind": "_6_gI5G_jobsKind",
+			"subagentRow": "_6_gI5G_subagentRow",
+			"jobsTitle": "_6_gI5G_jobsTitle",
+			"jobsKillArmed": "_6_gI5G_jobsKillArmed",
+			"subagentHeader": "_6_gI5G_subagentHeader",
+			"jobsContent": "_6_gI5G_jobsContent",
+			"subagentTitle": "_6_gI5G_subagentTitle",
+			"subagentContent": "_6_gI5G_subagentContent",
+			"jobsPane": "_6_gI5G_jobsPane",
+			"subagentError": "_6_gI5G_subagentError",
+			"subagentRowLoading": "_6_gI5G_subagentRowLoading",
+			"jobsPaneLabel": "_6_gI5G_jobsPaneLabel",
+			"subagentDot": "_6_gI5G_subagentDot",
+			"jobsPaneStatus": "_6_gI5G_jobsPaneStatus",
+			"jobs": "_6_gI5G_jobs",
+			"subagentLiveArgs": "_6_gI5G_subagentLiveArgs",
+			"jobsPaneError": "_6_gI5G_jobsPaneError",
+			"subagentLiveText": "_6_gI5G_subagentLiveText",
+			"subagentLabel": "_6_gI5G_subagentLabel",
+			"jobsRow": "_6_gI5G_jobsRow",
+			"jobsKillError": "_6_gI5G_jobsKillError",
+			"jobsLabel": "_6_gI5G_jobsLabel",
+			"subagentLive": "_6_gI5G_subagentLive",
+			"jobsSecondary": "_6_gI5G_jobsSecondary",
+			"jobsRowSelected": "_6_gI5G_jobsRowSelected",
+			"jobsPaneDot": "_6_gI5G_jobsPaneDot",
+			"jobsPaneHint": "_6_gI5G_jobsPaneHint",
+			"jobsCount": "_6_gI5G_jobsCount",
+			"subagentNode": "_6_gI5G_subagentNode",
+			"jobsPanePre": "_6_gI5G_jobsPanePre",
+			"subagentEmptyHint": "_6_gI5G_subagentEmptyHint",
+			"subagentLiveTool": "_6_gI5G_subagentLiveTool",
+			"subagentChildren": "_6_gI5G_subagentChildren",
+			"jobsHeader": "_6_gI5G_jobsHeader",
+			"subagentRowActive": "_6_gI5G_subagentRowActive",
+			"jobsKill": "_6_gI5G_jobsKill"
 		};
 		//#endregion
 		//#region src/client/SubagentView.tsx
@@ -15267,7 +15002,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						onClick: () => {
 							refresh(parentSessionId);
 						},
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline14, {}), t("retry")]
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, {}), t("retry")]
 					})]
 				}),
 				visibleEntries.map((entry) => {
@@ -15688,7 +15423,9 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			const openMain = (0, react.useCallback)(() => {
 				if (rootId === void 0) return;
 				try {
-					sessions.open?.(rootId);
+					const workspace = ctx.get("uiWorkspace");
+					if (workspace?.openSession !== void 0) workspace.openSession(rootId);
+					else sessions.open?.(rootId);
 				} catch (error) {
 					console.warn("[dsh-sidebar-lite] open session failed:", error);
 				}
@@ -15752,7 +15489,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 							onClick: () => {
 								if (rootId !== void 0) refresh(rootId);
 							},
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline14, {})
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, {})
 						})
 					]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -16105,8 +15842,8 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			return rows;
 		}
 		//#endregion
-		//#region \0dsh-css:K:\work\project\dsh\dsh-sidebar-lite\src\client\SideChatView.module.css.mjs
-		const css$1 = "._64dGEW_sidechat{flex-direction:column;flex:1;min-height:0;display:flex}._64dGEW_sidechatDetailHeader{border-bottom:1px solid var(--dsw-alias-hairline);flex:none;align-items:center;gap:4px;min-height:36px;padding:4px 8px 4px 12px;display:flex}._64dGEW_sidechatHeaderDot{flex:none}._64dGEW_sidechatHeaderSpacer{flex:1;min-width:0}._64dGEW_sidechatAgentBadge{border:1px solid var(--dsw-alias-hairline);max-width:55%;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;flex:none;padding:1px 8px;overflow:hidden}._64dGEW_sidechatIconBtn{width:26px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;transition:background-color .1s ease-out,color .1s ease-out;display:inline-flex}._64dGEW_sidechatIconBtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._64dGEW_sidechatIconBtn:disabled{opacity:.4;cursor:default}._64dGEW_sidechatHero{min-height:0;color:var(--dsw-alias-label-tertiary);text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:8px;padding:24px 20px;animation:.2s ease-out _64dGEW_sidechatFadeIn;display:flex}._64dGEW_sidechatHeroTitle{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);font-weight:500}._64dGEW_sidechatHeroDesc{max-width:300px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);line-height:1.6}._64dGEW_sidechatPrimaryBtn{background:var(--dsw-alias-button-info-fill,var(--dsw-alias-accent));color:var(--dsw-alias-button-info-label,var(--dsw-alias-accent-ink,#fff));font:var(--dsw-font-s-13);cursor:pointer;border:none;border-radius:999px;flex:none;margin-top:4px;padding:6px 14px;transition:opacity .1s ease-out}._64dGEW_sidechatPrimaryBtn:hover:not(:disabled){opacity:.88}._64dGEW_sidechatPrimaryBtn:disabled{opacity:.4;cursor:default}._64dGEW_sidechatHint{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);flex:none;padding:4px 12px}._64dGEW_sidechatError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-danger);flex:none;padding:4px 12px}._64dGEW_sidechatScroll{flex-direction:column;flex:1;gap:10px;min-height:0;padding:10px 12px;display:flex;overflow-y:auto}._64dGEW_sidechatScroll>*{animation:.18s ease-out _64dGEW_sidechatRowIn}._64dGEW_sidechatUser{background:var(--dsw-specific-bubble,var(--dsw-alias-bg-base));max-width:88%;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;border-radius:18px;align-self:flex-end;padding:8px 14px}._64dGEW_sidechatAssistant{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;align-self:stretch}._64dGEW_sidechatRow{align-self:stretch}._64dGEW_sidechatRowLine{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;padding:1px 0;display:flex}._64dGEW_sidechatRowSummary{cursor:pointer;user-select:none;list-style:none}._64dGEW_sidechatRowSummary::-webkit-details-marker{display:none}._64dGEW_sidechatRowSummary:hover{color:var(--dsw-alias-label-secondary)}._64dGEW_sidechatRowStatic{cursor:default}._64dGEW_sidechatRowChevron{flex:none;align-items:center;transition:transform .1s ease-out;display:inline-flex}._64dGEW_sidechatRow[open] ._64dGEW_sidechatRowChevron{transform:rotate(90deg)}._64dGEW_sidechatRowLabel{text-overflow:ellipsis;white-space:nowrap;max-width:60%;color:var(--dsw-alias-label-secondary);flex:none;overflow:hidden}._64dGEW_sidechatRowMono{font-family:var(--dsw-font-mono)}._64dGEW_sidechatRowMeta{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--dsw-font-mono);color:var(--dsw-alias-label-tertiary);flex:1;overflow:hidden}._64dGEW_sidechatRowFailed ._64dGEW_sidechatRowLabel,._64dGEW_sidechatRowFailed ._64dGEW_sidechatRowMeta{color:var(--dsw-alias-danger)}._64dGEW_sidechatRowBody{border-left:1px solid var(--dsw-alias-hairline);margin:2px 0 4px 7px;padding:2px 0 2px 10px}._64dGEW_sidechatRowProse{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto}._64dGEW_sidechatRowCode{font:var(--dsw-font-xxs-12);font-family:var(--dsw-font-mono);color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;margin:0;padding:4px 0;overflow-y:auto}._64dGEW_sidechatRowCode+._64dGEW_sidechatRowCode{border-top:1px solid var(--dsw-alias-hairline)}._64dGEW_sidechatShimmerText{background-image:linear-gradient(90deg, var(--dsw-alias-label-tertiary) 0%, var(--dsw-alias-label-primary) 50%, var(--dsw-alias-label-tertiary) 100%);color:#0000;background-size:200% 100%;-webkit-background-clip:text;background-clip:text;animation:2.6s linear infinite _64dGEW_sidechatSweep}._64dGEW_sidechatStatus{flex:none;align-items:center;gap:8px;padding:2px 14px 6px;animation:.16s ease-out _64dGEW_sidechatFadeIn;display:flex}._64dGEW_sidechatStatusText{font:var(--dsw-font-xxs-12);background-image:linear-gradient(90deg, var(--dsw-alias-label-tertiary) 0%, var(--dsw-alias-label-primary) 50%, var(--dsw-alias-label-tertiary) 100%);color:#0000;background-size:200% 100%;-webkit-background-clip:text;background-clip:text;animation:2.6s linear infinite _64dGEW_sidechatSweep}._64dGEW_sidechatComposer{border:1px solid var(--dsw-alias-border-l2-darkmode-thin,var(--dsw-alias-hairline));background:var(--dsw-specific-input-major,var(--dsw-alias-bg-base));box-shadow:var(--dsw-shadow-lv2,none);border-radius:16px;flex-direction:column;flex:none;gap:4px;margin:0 8px 8px;padding:8px 8px 6px 14px;display:flex}._64dGEW_sidechatComposerInput{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-s-14);resize:none;background:0 0;border:none;outline:none;max-height:132px;padding:2px 0;line-height:22px}._64dGEW_sidechatComposerInput::placeholder{color:var(--dsw-alias-label-tertiary)}._64dGEW_sidechatComposerBar{flex:none;align-items:center;gap:8px;min-height:28px;display:flex}._64dGEW_sidechatComposerMeta{min-width:0;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}._64dGEW_sidechatSendBtn{background:var(--dsw-alias-button-info-fill,var(--dsw-alias-accent));width:28px;height:28px;color:var(--dsw-alias-button-info-label,var(--dsw-alias-accent-ink,#fff));cursor:pointer;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;transition:opacity .1s ease-out;animation:.12s ease-out _64dGEW_sidechatBtnIn;display:inline-flex}._64dGEW_sidechatSendBtn:hover:not(:disabled){opacity:.88}._64dGEW_sidechatSendBtn:disabled{opacity:.35;cursor:default}@keyframes _64dGEW_sidechatRowIn{0%{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@keyframes _64dGEW_sidechatFadeIn{0%{opacity:0}to{opacity:1}}@keyframes _64dGEW_sidechatBtnIn{0%{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}@keyframes _64dGEW_sidechatSweep{0%{background-position:200% 0}to{background-position:-200% 0}}@media (prefers-reduced-motion:reduce){._64dGEW_sidechatScroll>*,._64dGEW_sidechatHero,._64dGEW_sidechatStatus,._64dGEW_sidechatSendBtn{animation:none}._64dGEW_sidechatStatusText,._64dGEW_sidechatShimmerText{color:var(--dsw-alias-label-tertiary);background-image:none;animation:none}._64dGEW_sidechatRowChevron{transition:none}}";
+		//#region \0dsh-css:/workspace/1/dsh/packages/dsh-sidebar-lite/src/client/SideChatView.module.css.mjs
+		const css$1 = ".lfy9qq_sidechat{flex-direction:column;flex:1;min-height:0;display:flex}.lfy9qq_sidechatDetailHeader{border-bottom:1px solid var(--dsw-alias-hairline);flex:none;align-items:center;gap:4px;min-height:36px;padding:4px 8px 4px 12px;display:flex}.lfy9qq_sidechatHeaderDot{flex:none}.lfy9qq_sidechatHeaderSpacer{flex:1;min-width:0}.lfy9qq_sidechatAgentBadge{border:1px solid var(--dsw-alias-hairline);max-width:55%;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;flex:none;padding:1px 8px;overflow:hidden}.lfy9qq_sidechatIconBtn{width:26px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;transition:background-color .1s ease-out,color .1s ease-out;display:inline-flex}.lfy9qq_sidechatIconBtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.lfy9qq_sidechatIconBtn:disabled{opacity:.4;cursor:default}.lfy9qq_sidechatHero{min-height:0;color:var(--dsw-alias-label-tertiary);text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:8px;padding:24px 20px;animation:.2s ease-out lfy9qq_sidechatFadeIn;display:flex}.lfy9qq_sidechatHeroTitle{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);font-weight:500}.lfy9qq_sidechatHeroDesc{max-width:300px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);line-height:1.6}.lfy9qq_sidechatPrimaryBtn{background:var(--dsw-alias-button-info-fill,var(--dsw-alias-accent));color:var(--dsw-alias-button-info-label,var(--dsw-alias-accent-ink,#fff));font:var(--dsw-font-s-13);cursor:pointer;border:none;border-radius:999px;flex:none;margin-top:4px;padding:6px 14px;transition:opacity .1s ease-out}.lfy9qq_sidechatPrimaryBtn:hover:not(:disabled){opacity:.88}.lfy9qq_sidechatPrimaryBtn:disabled{opacity:.4;cursor:default}.lfy9qq_sidechatHint{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);flex:none;padding:4px 12px}.lfy9qq_sidechatError{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-danger);flex:none;padding:4px 12px}.lfy9qq_sidechatScroll{flex-direction:column;flex:1;gap:10px;min-height:0;padding:10px 12px;display:flex;overflow-y:auto}.lfy9qq_sidechatScroll>*{animation:.18s ease-out lfy9qq_sidechatRowIn}.lfy9qq_sidechatUser{background:var(--dsw-specific-bubble,var(--dsw-alias-bg-base));max-width:88%;font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;border-radius:18px;align-self:flex-end;padding:8px 14px}.lfy9qq_sidechatAssistant{font:var(--dsw-font-s-14);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;align-self:stretch}.lfy9qq_sidechatRow{align-self:stretch}.lfy9qq_sidechatRowLine{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;padding:1px 0;display:flex}.lfy9qq_sidechatRowSummary{cursor:pointer;user-select:none;list-style:none}.lfy9qq_sidechatRowSummary::-webkit-details-marker{display:none}.lfy9qq_sidechatRowSummary:hover{color:var(--dsw-alias-label-secondary)}.lfy9qq_sidechatRowStatic{cursor:default}.lfy9qq_sidechatRowChevron{flex:none;align-items:center;transition:transform .1s ease-out;display:inline-flex}.lfy9qq_sidechatRow[open] .lfy9qq_sidechatRowChevron{transform:rotate(90deg)}.lfy9qq_sidechatRowLabel{text-overflow:ellipsis;white-space:nowrap;max-width:60%;color:var(--dsw-alias-label-secondary);flex:none;overflow:hidden}.lfy9qq_sidechatRowMono{font-family:var(--dsw-font-mono)}.lfy9qq_sidechatRowMeta{text-overflow:ellipsis;white-space:nowrap;min-width:0;font-family:var(--dsw-font-mono);color:var(--dsw-alias-label-tertiary);flex:1;overflow:hidden}.lfy9qq_sidechatRowFailed .lfy9qq_sidechatRowLabel,.lfy9qq_sidechatRowFailed .lfy9qq_sidechatRowMeta{color:var(--dsw-alias-danger)}.lfy9qq_sidechatRowBody{border-left:1px solid var(--dsw-alias-hairline);margin:2px 0 4px 7px;padding:2px 0 2px 10px}.lfy9qq_sidechatRowProse{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto}.lfy9qq_sidechatRowCode{font:var(--dsw-font-xxs-12);font-family:var(--dsw-font-mono);color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;margin:0;padding:4px 0;overflow-y:auto}.lfy9qq_sidechatRowCode+.lfy9qq_sidechatRowCode{border-top:1px solid var(--dsw-alias-hairline)}.lfy9qq_sidechatShimmerText{background-image:linear-gradient(90deg, var(--dsw-alias-label-tertiary) 0%, var(--dsw-alias-label-primary) 50%, var(--dsw-alias-label-tertiary) 100%);color:#0000;background-size:200% 100%;-webkit-background-clip:text;background-clip:text;animation:2.6s linear infinite lfy9qq_sidechatSweep}.lfy9qq_sidechatStatus{flex:none;align-items:center;gap:8px;padding:2px 14px 6px;animation:.16s ease-out lfy9qq_sidechatFadeIn;display:flex}.lfy9qq_sidechatStatusText{font:var(--dsw-font-xxs-12);background-image:linear-gradient(90deg, var(--dsw-alias-label-tertiary) 0%, var(--dsw-alias-label-primary) 50%, var(--dsw-alias-label-tertiary) 100%);color:#0000;background-size:200% 100%;-webkit-background-clip:text;background-clip:text;animation:2.6s linear infinite lfy9qq_sidechatSweep}.lfy9qq_sidechatComposer{border:1px solid var(--dsw-alias-border-l2-darkmode-thin,var(--dsw-alias-hairline));background:var(--dsw-specific-input-major,var(--dsw-alias-bg-base));box-shadow:var(--dsw-shadow-lv2,none);border-radius:16px;flex-direction:column;flex:none;gap:4px;margin:0 8px 8px;padding:8px 8px 6px 14px;display:flex}.lfy9qq_sidechatComposerInput{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);font:var(--dsw-font-s-14);resize:none;background:0 0;border:none;outline:none;max-height:132px;padding:2px 0;line-height:22px}.lfy9qq_sidechatComposerInput::placeholder{color:var(--dsw-alias-label-tertiary)}.lfy9qq_sidechatComposerBar{flex:none;align-items:center;gap:8px;min-height:28px;display:flex}.lfy9qq_sidechatComposerMeta{min-width:0;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.lfy9qq_sidechatSendBtn{background:var(--dsw-alias-button-info-fill,var(--dsw-alias-accent));width:28px;height:28px;color:var(--dsw-alias-button-info-label,var(--dsw-alias-accent-ink,#fff));cursor:pointer;border:none;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;transition:opacity .1s ease-out;animation:.12s ease-out lfy9qq_sidechatBtnIn;display:inline-flex}.lfy9qq_sidechatSendBtn:hover:not(:disabled){opacity:.88}.lfy9qq_sidechatSendBtn:disabled{opacity:.35;cursor:default}@keyframes lfy9qq_sidechatRowIn{0%{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@keyframes lfy9qq_sidechatFadeIn{0%{opacity:0}to{opacity:1}}@keyframes lfy9qq_sidechatBtnIn{0%{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}@keyframes lfy9qq_sidechatSweep{0%{background-position:200% 0}to{background-position:-200% 0}}@media (prefers-reduced-motion:reduce){.lfy9qq_sidechatScroll>*,.lfy9qq_sidechatHero,.lfy9qq_sidechatStatus,.lfy9qq_sidechatSendBtn{animation:none}.lfy9qq_sidechatStatusText,.lfy9qq_sidechatShimmerText{color:var(--dsw-alias-label-tertiary);background-image:none;animation:none}.lfy9qq_sidechatRowChevron{transition:none}}";
 		const tagId$1 = "dsh-external/dsh-sidebar-lite/SideChatView.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
@@ -16116,45 +15853,45 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			document.head.appendChild(tag);
 		}
 		var SideChatView_module_css_default = {
-			"sidechatAgentBadge": "_64dGEW_sidechatAgentBadge",
-			"sidechatAssistant": "_64dGEW_sidechatAssistant",
-			"sidechatRowMeta": "_64dGEW_sidechatRowMeta",
-			"sidechatScroll": "_64dGEW_sidechatScroll",
-			"sidechatRowLabel": "_64dGEW_sidechatRowLabel",
-			"sidechatIconBtn": "_64dGEW_sidechatIconBtn",
-			"sidechatRow": "_64dGEW_sidechatRow",
-			"sidechatPrimaryBtn": "_64dGEW_sidechatPrimaryBtn",
-			"sidechatHeaderDot": "_64dGEW_sidechatHeaderDot",
-			"sidechatHeaderSpacer": "_64dGEW_sidechatHeaderSpacer",
-			"sidechatHero": "_64dGEW_sidechatHero",
-			"sidechatFadeIn": "_64dGEW_sidechatFadeIn",
-			"sidechatRowIn": "_64dGEW_sidechatRowIn",
-			"sidechatUser": "_64dGEW_sidechatUser",
-			"sidechatHint": "_64dGEW_sidechatHint",
-			"sidechatRowSummary": "_64dGEW_sidechatRowSummary",
-			"sidechatShimmerText": "_64dGEW_sidechatShimmerText",
-			"sidechatSweep": "_64dGEW_sidechatSweep",
-			"sidechatStatus": "_64dGEW_sidechatStatus",
-			"sidechatHeroDesc": "_64dGEW_sidechatHeroDesc",
-			"sidechatRowLine": "_64dGEW_sidechatRowLine",
-			"sidechatHeroTitle": "_64dGEW_sidechatHeroTitle",
-			"sidechatError": "_64dGEW_sidechatError",
-			"sidechatRowProse": "_64dGEW_sidechatRowProse",
-			"sidechatStatusText": "_64dGEW_sidechatStatusText",
-			"sidechatComposer": "_64dGEW_sidechatComposer",
-			"sidechatComposerInput": "_64dGEW_sidechatComposerInput",
-			"sidechatComposerMeta": "_64dGEW_sidechatComposerMeta",
-			"sidechatBtnIn": "_64dGEW_sidechatBtnIn",
-			"sidechatSendBtn": "_64dGEW_sidechatSendBtn",
-			"sidechatRowFailed": "_64dGEW_sidechatRowFailed",
-			"sidechatRowStatic": "_64dGEW_sidechatRowStatic",
-			"sidechat": "_64dGEW_sidechat",
-			"sidechatRowCode": "_64dGEW_sidechatRowCode",
-			"sidechatDetailHeader": "_64dGEW_sidechatDetailHeader",
-			"sidechatComposerBar": "_64dGEW_sidechatComposerBar",
-			"sidechatRowMono": "_64dGEW_sidechatRowMono",
-			"sidechatRowChevron": "_64dGEW_sidechatRowChevron",
-			"sidechatRowBody": "_64dGEW_sidechatRowBody"
+			"sidechatSendBtn": "lfy9qq_sidechatSendBtn",
+			"sidechatHint": "lfy9qq_sidechatHint",
+			"sidechatAgentBadge": "lfy9qq_sidechatAgentBadge",
+			"sidechatScroll": "lfy9qq_sidechatScroll",
+			"sidechatHeroTitle": "lfy9qq_sidechatHeroTitle",
+			"sidechatRowBody": "lfy9qq_sidechatRowBody",
+			"sidechatAssistant": "lfy9qq_sidechatAssistant",
+			"sidechatStatusText": "lfy9qq_sidechatStatusText",
+			"sidechatComposerMeta": "lfy9qq_sidechatComposerMeta",
+			"sidechatRowLabel": "lfy9qq_sidechatRowLabel",
+			"sidechatShimmerText": "lfy9qq_sidechatShimmerText",
+			"sidechatComposerInput": "lfy9qq_sidechatComposerInput",
+			"sidechatRowFailed": "lfy9qq_sidechatRowFailed",
+			"sidechatComposerBar": "lfy9qq_sidechatComposerBar",
+			"sidechatPrimaryBtn": "lfy9qq_sidechatPrimaryBtn",
+			"sidechatStatus": "lfy9qq_sidechatStatus",
+			"sidechatRowChevron": "lfy9qq_sidechatRowChevron",
+			"sidechatDetailHeader": "lfy9qq_sidechatDetailHeader",
+			"sidechatRowMeta": "lfy9qq_sidechatRowMeta",
+			"sidechatHeroDesc": "lfy9qq_sidechatHeroDesc",
+			"sidechatUser": "lfy9qq_sidechatUser",
+			"sidechatComposer": "lfy9qq_sidechatComposer",
+			"sidechatRowCode": "lfy9qq_sidechatRowCode",
+			"sidechatRowLine": "lfy9qq_sidechatRowLine",
+			"sidechatRowStatic": "lfy9qq_sidechatRowStatic",
+			"sidechatHeaderSpacer": "lfy9qq_sidechatHeaderSpacer",
+			"sidechatRowSummary": "lfy9qq_sidechatRowSummary",
+			"sidechatRowIn": "lfy9qq_sidechatRowIn",
+			"sidechatRowMono": "lfy9qq_sidechatRowMono",
+			"sidechatFadeIn": "lfy9qq_sidechatFadeIn",
+			"sidechatIconBtn": "lfy9qq_sidechatIconBtn",
+			"sidechatHeaderDot": "lfy9qq_sidechatHeaderDot",
+			"sidechat": "lfy9qq_sidechat",
+			"sidechatSweep": "lfy9qq_sidechatSweep",
+			"sidechatBtnIn": "lfy9qq_sidechatBtnIn",
+			"sidechatError": "lfy9qq_sidechatError",
+			"sidechatRow": "lfy9qq_sidechatRow",
+			"sidechatHero": "lfy9qq_sidechatHero",
+			"sidechatRowProse": "lfy9qq_sidechatRowProse"
 		};
 		//#endregion
 		//#region src/client/SideChatView.tsx
@@ -16253,7 +15990,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: SideChatView_module_css_default.sidechatRowChevron,
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutline14, { size: 12 })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 12 })
 						}),
 						label,
 						meta
@@ -16271,14 +16008,20 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					className: SideChatView_module_css_default.sidechatUser,
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
 						text: row.text,
-						codeLabels: labels
+						labels: {
+							code: labels,
+							footnotes: "Footnotes"
+						}
 					})
 				}, `${row.kind}:${row.seq}`);
 				case "assistant": return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: SideChatView_module_css_default.sidechatAssistant,
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
 						text: row.text,
-						codeLabels: labels
+						labels: {
+							code: labels,
+							footnotes: "Footnotes"
+						}
 					})
 				}, `${row.kind}:${row.seq}`);
 				case "reasoning": return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CollapsibleRow, {
@@ -16491,7 +16234,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				const items = [{
 					id: "$new",
 					label: t("sideChatNew"),
-					icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutline16, {})
+					icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, {})
 				}];
 				if (threads.length > 0) {
 					items.push({
@@ -16555,7 +16298,9 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					const title = summary === void 0 ? "" : threadDisplayTitle(summary.displayTitle).trim();
 					const binding = ctx.sessions.binding?.(newId);
 					if (binding !== void 0 && title !== "") await binding.session.rename(title);
-					ctx.sessions.open?.(newId);
+					const workspace = ctx.get("uiWorkspace");
+					if (workspace?.openSession !== void 0) workspace.openSession(newId);
+					else ctx.sessions.open?.(newId);
 					setSaved(true);
 				} catch (cause) {
 					setError(cause instanceof Error ? cause.message : String(cause));
@@ -16568,7 +16313,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: SideChatView_module_css_default.sidechatHero,
 					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutline16, {}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, {}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 							className: clsx(SideChatView_module_css_default.sidechatHeroTitle, busy === "starting" && SideChatView_module_css_default.sidechatShimmerText),
 							children: busy === "starting" ? t("sideChatCreating") : t("sideChatEmpty")
@@ -16698,14 +16443,14 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								onClick: () => void handleCancel(),
 								disabled: busy !== null,
 								title: t("sideChatCancelTitle"),
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconStopFill16, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconStopFillRegular, {})
 							}, "stop") : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
 								className: SideChatView_module_css_default.sidechatSendBtn,
 								onClick: () => void handleSend(),
 								disabled: composer.trim() === "" || busy !== null,
 								title: t("sideChatSend"),
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSendOutline16, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSendOutlineRegular, {})
 							}, "send")]
 						})]
 					})
@@ -17050,7 +16795,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								title: t("browserBack"),
 								disabled: cursor <= 0,
 								onClick: goBack,
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronLeftOutline14, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronLeftOutlineRegular, {})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -17059,7 +16804,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								title: t("browserForward"),
 								disabled: cursor >= history.length - 1,
 								onClick: goForward,
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutline14, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, {})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -17069,7 +16814,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								onClick: () => {
 									setReloadKey((key) => key + 1);
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutline14, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, {})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
 								className: sidebar_module_css_default.browserInput,
@@ -17091,7 +16836,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								onClick: () => {
 									navigateTo(input);
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutline14, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconLinkOutlineRegular, {})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -17159,7 +16904,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: sidebar_module_css_default.browserBlocked,
 				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutline16, { size: 16 }),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: sidebar_module_css_default.browserBlockedTitle,
 						children: t("browserEmbedBlocked", { host })
@@ -17224,7 +16969,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "editor",
 					title: () => t("files"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenRegular, { size }),
 					order: 10,
 					hidden: false,
 					dedupeKey: (tab) => tab.path,
@@ -17236,12 +16981,12 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 							desc: () => t("editorExplorerDesc"),
 							options: [{
 								value: true,
-								icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPanelLeftOutline16, { size }),
+								icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPanelLeftOutlineRegular, { size }),
 								title: () => t("editorExplorerMerged"),
 								desc: () => t("editorExplorerMergedDesc")
 							}, {
 								value: false,
-								icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size }),
+								icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutlineRegular, { size }),
 								title: () => t("editorExplorerSplit"),
 								desc: () => t("editorExplorerSplitDesc")
 							}]
@@ -17265,7 +17010,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "git",
 					title: () => t("git"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutline16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutlineRegular, { size }),
 					order: 20,
 					single: true,
 					component: ({ ctx, store, scope, visible, onOpenDiff }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(GitView, {
@@ -17280,7 +17025,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "subagent",
 					title: () => t("subagent"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconThinkOutline16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconThinkOutlineRegular, { size }),
 					order: 30,
 					single: true,
 					settings: { toggles: [{
@@ -17304,7 +17049,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "sidechat",
 					title: () => t("sideChat"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutline16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size }),
 					order: 35,
 					createTab: () => {
 						const threadId = consumeSidechatSeed();
@@ -17667,7 +17412,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "code",
 					title: () => t("viewerCode"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutline16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCodeOutlineRegular, { size }),
 					exts: [],
 					priority: -100,
 					fetchStrategy: "fsRead",
@@ -17676,7 +17421,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				{
 					id: "binary-download",
 					title: () => t("viewerBinary"),
-					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutline16, { size }),
+					icon: (size) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutlineRegular, { size }),
 					exts: [
 						"doc",
 						"xls",
@@ -17901,7 +17646,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 										event.stopPropagation();
 										onClose(tab.id);
 									},
-									children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseFill14, {})
+									children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseFillRegular, {})
 								})
 							]
 						}, tab.id)),
@@ -17931,7 +17676,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 									setMenuOpen((v) => !v);
 									setTabMenu(null);
 								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutline16, {})
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, {})
 							})
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Menu, {
@@ -18408,293 +18153,6 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 		* renderer, so every tab type (terminal, editor, plugin tabs) floats
 		* unchanged.
 		*/
-		/** The pane under a viewport point, if any (rect hit-test; the dragged
-		*  window itself is not a pane, so it cannot shadow the targets). */
-		function paneAt(x, y) {
-			for (const pane of document.querySelectorAll("[data-dsh-pane]")) {
-				const rect = pane.getBoundingClientRect();
-				if (rect.width === 0 || rect.height === 0) continue;
-				if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return pane;
-			}
-			return null;
-		}
-		/** Pointer-capture helpers tolerant of environments without the API (jsdom
-		*  lacks setPointerCapture — component tests dispatch plain MouseEvents, so
-		*  the optional calls keep them driving the drag; real browsers always have
-		*  it and a missing pointerId can never occur there). */
-		const capturePointer = (element, pointerId) => {
-			element.setPointerCapture?.(pointerId);
-		};
-		const releasePointer = (element, pointerId) => {
-			element.releasePointerCapture?.(pointerId);
-		};
-		/** Whether the element holds the pointer (assumed true without the API). */
-		const holdsPointer = (element, pointerId) => {
-			return element.hasPointerCapture?.(pointerId) !== false;
-		};
-		function FreeWindow(props) {
-			const { float, renderTab, getTabIcon, onRaise, onMove, onResize, onDock, onClose } = props;
-			const rootRef = (0, react.useRef)(null);
-			const dragRef = (0, react.useRef)(null);
-			const dockTargetRef = (0, react.useRef)(null);
-			const frameRef = (0, react.useRef)(null);
-			const pendingRef = (0, react.useRef)(null);
-			const [dragging, setDragging] = (0, react.useState)(null);
-			const [menu, setMenu] = (0, react.useState)(null);
-			(0, react.useEffect)(() => () => {
-				if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-				dockTargetRef.current?.removeAttribute("data-dsh-float-dock-over");
-			}, []);
-			/** Apply the pending geometry to the DOM (one rAF per frame at most). */
-			const scheduleApply = (geo) => {
-				pendingRef.current = geo;
-				if (frameRef.current !== null) return;
-				frameRef.current = requestAnimationFrame(() => {
-					frameRef.current = null;
-					const pending = pendingRef.current;
-					const drag = dragRef.current;
-					const root = rootRef.current;
-					if (pending === null || drag === null || root === null) return;
-					drag.applied = pending;
-					root.style.left = `${pending.x}px`;
-					root.style.top = `${pending.y}px`;
-					root.style.width = `${pending.w}px`;
-					root.style.height = `${pending.h}px`;
-				});
-			};
-			/** Flush the pending frame synchronously (the release path's last write). */
-			const flushNow = () => {
-				const pending = pendingRef.current;
-				const drag = dragRef.current;
-				const root = rootRef.current;
-				if (pending === null || drag === null || root === null) return;
-				if (frameRef.current !== null) {
-					cancelAnimationFrame(frameRef.current);
-					frameRef.current = null;
-				}
-				pendingRef.current = null;
-				drag.applied = pending;
-				root.style.left = `${pending.x}px`;
-				root.style.top = `${pending.y}px`;
-				root.style.width = `${pending.w}px`;
-				root.style.height = `${pending.h}px`;
-			};
-			const clearDockHighlight = () => {
-				dockTargetRef.current?.removeAttribute("data-dsh-float-dock-over");
-				dockTargetRef.current = null;
-			};
-			/** Release a drag: `pane` (when set) docks instead of moving. */
-			const finishDrag = (mode, geo, pane) => {
-				const drag = dragRef.current;
-				if (drag === null || drag.committed) return;
-				drag.committed = true;
-				dragRef.current = null;
-				setDragging(null);
-				const target = pane ?? dockTargetRef.current;
-				clearDockHighlight();
-				if (mode === "move" && target !== null) onDock(target.getAttribute("data-dsh-pane"));
-				else if (mode === "move") onMove(geo.x, geo.y);
-				else onResize(geo.w, geo.h);
-			};
-			/** Cancel-path settle (pointercancel / lostpointercapture): the last
-			* APPLIED geometry is the user-visible truth — commit it, never roll back
-			* (the panel drags' issue-#247 semantics). The mode comes from the ref —
-			* the React `dragging` state can still be null when the cancel lands
-			* before the pointerdown re-render commits. */
-			const abortDrag = () => {
-				const drag = dragRef.current;
-				if (drag === null || drag.committed) return;
-				flushNow();
-				finishDrag(drag.mode, drag.applied, null);
-			};
-			const clampMove = (x, y) => {
-				const vw = window.innerWidth;
-				const vh = window.innerHeight;
-				return {
-					x: Math.min(Math.max(x, 0), Math.max(0, vw - float.w)),
-					y: Math.min(Math.max(y, 0), Math.max(0, vh - float.h)),
-					w: float.w,
-					h: float.h
-				};
-			};
-			const clampResize = (w, h) => {
-				const vw = window.innerWidth;
-				const vh = window.innerHeight;
-				return {
-					x: float.x,
-					y: float.y,
-					w: Math.round(Math.min(Math.max(w, 320), Math.max(320, vw - float.x))),
-					h: Math.round(Math.min(Math.max(h, 200), Math.max(200, vh - float.y)))
-				};
-			};
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				ref: rootRef,
-				className: clsx(sidebar_module_css_default.floatWindow, dragging !== null && sidebar_module_css_default.floatWindowDragging),
-				"data-dsh-float-window": true,
-				"data-dsh-float-id": float.id,
-				style: {
-					left: float.x,
-					top: float.y,
-					width: float.w,
-					height: float.h
-				},
-				onPointerDown: () => {
-					onRaise();
-				},
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: sidebar_module_css_default.floatHeader,
-						onPointerDown: (event) => {
-							if (event.button !== 0) return;
-							if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
-							if (event.target instanceof Element && event.target.closest("button") !== null) return;
-							event.preventDefault();
-							capturePointer(event.currentTarget, event.pointerId);
-							dragRef.current = {
-								mode: "move",
-								pointerX: event.clientX,
-								pointerY: event.clientY,
-								startX: float.x,
-								startY: float.y,
-								startW: float.w,
-								startH: float.h,
-								applied: {
-									x: float.x,
-									y: float.y,
-									w: float.w,
-									h: float.h
-								},
-								committed: false
-							};
-							setDragging("move");
-						},
-						onPointerMove: (event) => {
-							const drag = dragRef.current;
-							if (drag === null || !holdsPointer(event.currentTarget, event.pointerId)) return;
-							const geo = clampMove(drag.startX + (event.clientX - drag.pointerX), drag.startY + (event.clientY - drag.pointerY));
-							scheduleApply(geo);
-							const target = paneAt(event.clientX, event.clientY);
-							if (target !== dockTargetRef.current) {
-								clearDockHighlight();
-								if (target !== null) target.setAttribute("data-dsh-float-dock-over", "");
-								dockTargetRef.current = target;
-							}
-						},
-						onPointerUp: (event) => {
-							if (dragRef.current === null || !holdsPointer(event.currentTarget, event.pointerId)) return;
-							releasePointer(event.currentTarget, event.pointerId);
-							flushNow();
-							const geo = clampMove(dragRef.current.startX + (event.clientX - dragRef.current.pointerX), dragRef.current.startY + (event.clientY - dragRef.current.pointerY));
-							finishDrag("move", geo, paneAt(event.clientX, event.clientY));
-						},
-						onPointerCancel: () => {
-							abortDrag();
-						},
-						onLostPointerCapture: () => {
-							abortDrag();
-						},
-						onContextMenu: (event) => {
-							event.preventDefault();
-							setMenu({
-								x: event.clientX,
-								y: event.clientY
-							});
-						},
-						children: [
-							getTabIcon?.(float.tab) ?? null,
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								className: sidebar_module_css_default.floatTitle,
-								title: float.tab.title,
-								children: float.tab.title
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: sidebar_module_css_default.floatClose,
-								"aria-label": t("close"),
-								onClick: (event) => {
-									event.stopPropagation();
-									onClose();
-								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseFill14, {})
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Menu, {
-								open: menu !== null,
-								onClose: () => {
-									setMenu(null);
-								},
-								items: [{
-									id: "dock",
-									label: t("dockToSidebar")
-								}, {
-									id: "close",
-									label: t("close")
-								}],
-								onSelect: (id) => {
-									setMenu(null);
-									if (id === "dock") onDock(null);
-									else if (id === "close") onClose();
-								},
-								portal: true,
-								align: "start",
-								getAnchorRect: () => menu === null ? null : new DOMRect(menu.x, menu.y, 0, 0),
-								anchor: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {})
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: sidebar_module_css_default.floatContent,
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: sidebar_module_css_default.paneTab,
-							children: renderTab(float.tab, true, float.id)
-						})
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: sidebar_module_css_default.floatResize,
-						onPointerDown: (event) => {
-							if (event.button !== 0) return;
-							if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
-							event.preventDefault();
-							capturePointer(event.currentTarget, event.pointerId);
-							dragRef.current = {
-								mode: "resize",
-								pointerX: event.clientX,
-								pointerY: event.clientY,
-								startX: float.x,
-								startY: float.y,
-								startW: float.w,
-								startH: float.h,
-								applied: {
-									x: float.x,
-									y: float.y,
-									w: float.w,
-									h: float.h
-								},
-								committed: false
-							};
-							setDragging("resize");
-						},
-						onPointerMove: (event) => {
-							const drag = dragRef.current;
-							if (drag === null || !holdsPointer(event.currentTarget, event.pointerId)) return;
-							scheduleApply(clampResize(drag.startW + (event.clientX - drag.pointerX), drag.startH + (event.clientY - drag.pointerY)));
-						},
-						onPointerUp: (event) => {
-							if (dragRef.current === null || !holdsPointer(event.currentTarget, event.pointerId)) return;
-							releasePointer(event.currentTarget, event.pointerId);
-							flushNow();
-							const geo = clampResize(dragRef.current.startW + (event.clientX - dragRef.current.pointerX), dragRef.current.startH + (event.clientY - dragRef.current.pointerY));
-							finishDrag("resize", geo, null);
-						},
-						onPointerCancel: () => {
-							abortDrag();
-						},
-						onLostPointerCapture: () => {
-							abortDrag();
-						}
-					})
-				]
-			});
-		}
 		//#endregion
 		//#region src/client/OrphanedTab.tsx
 		function OrphanedTab(props) {
@@ -18804,14 +18262,14 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 		* (mirror of the terminal view's own cap; the loop restarts on session switch). */
 		const FAILURE_LIMIT = 3;
 		/**
-		* Subagent auto-open debounce (ms). The host delivers a new child's origin
-		* and its title in SEPARATE frames: a Side Chat thread's first visible
-		* frame still shows a fallback title (no 'Side: ' prefix), so an immediate
-		* 0→N decision mistakes it for a genuine subagent and pops the task page.
-		* The trigger therefore re-evaluates against the live snapshot once the
-		* title frame has had time to land.
+		* The side workbench is RETIRED: DSH's native right sidebar (files) replaced
+		* it, and this plugin is kept only for its host file APIs (the native tree's
+		* context menu, download, rename and drag-move call /sidebar/api) plus the
+		* bottom terminal panel. The corner toggle and the right panel are gone; the
+		* code stays behind this switch so the workbench can be revived without
+		* re-adding the wiring.
 		*/
-		const AUTO_OPEN_DEBOUNCE_MS = 500;
+		const RIGHT_PANEL_ENABLED = false;
 		/**
 		* OS file drags over the sidebar belong to the sidebar, not to the chat:
 		* DSH's composer (InputBar) listens for file drags on the DOCUMENT and
@@ -18941,13 +18399,20 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			}, []);
 			const layoutViewportHeight = visualViewportHeight ?? viewport.height;
 			const sessionList = (0, react.useSyncExternalStore)((0, react.useMemo)(() => (callback) => ctx.sessions.list.subscribe(callback), [ctx]), (0, react.useCallback)(() => ctx.sessions.list.getSnapshot(), [ctx]));
-			const current = sessionList.current;
+			const current = currentSessionIdOf(sessionList);
 			const snapshot = (0, react.useSyncExternalStore)((0, react.useCallback)((callback) => store.subscribe(callback), [store]), (0, react.useCallback)(() => store.getSnapshot(), [store]));
 			(0, react.useEffect)(() => {
 				store.setSession(current);
 			}, [current, store]);
 			const state = snapshot.state;
 			const sessionId = snapshot.sessionId;
+			const [dockRight, setDockRight] = (0, react.useState)(false);
+			const dockRightRef = (0, react.useRef)(false);
+			const dockLeftRef = (0, react.useRef)(0);
+			const bottomOpenRef = (0, react.useRef)(false);
+			const narrowRef = (0, react.useRef)(false);
+			bottomOpenRef.current = state?.bottomOpen === true;
+			narrowRef.current = narrow;
 			const summaryCwd = sessionId === void 0 ? void 0 : sessionList.byId[sessionId]?.cwd;
 			const pushedBottomHeight = (bottomOpen, bottomHeight) => layoutPushSize({
 				narrow,
@@ -18958,7 +18423,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				viewportWidth: viewport.width,
 				viewportHeight: layoutViewportHeight
 			}).height;
-			const collapsed = state === void 0 || !state.panelOpen;
+			const collapsed = !narrow;
 			(0, react.useEffect)(() => {
 				if (collapsed) document.body.setAttribute("data-dsh-sidebar-collapsed", "");
 				else document.body.removeAttribute("data-dsh-sidebar-collapsed");
@@ -19152,52 +18617,9 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					socket?.close();
 				};
 			}, [sessionId, store]);
-			/**
-			* Subagent auto-activation: the moment the current conversation spawns its
-			* FIRST direct subagent (a 0 → N transition on the list feed), the "auto
-			* open" pref is on, and the Subagent tab type is enabled in settings,
-			* open the panel (if collapsed) and focus the Subagent page
-			* (single-instance: an existing tab is focused, never duplicated).
-			* Switching to a session that already has subagents never triggers — its
-			* baseline starts at the current count — so a deliberate layout is never
-			* fought.
-			*
-			* The decision is DEBOUNCED (AUTO_OPEN_DEBOUNCE_MS): a Side Chat thread
-			* is also a subagent-origin child, and its 'Side: ' title lands one frame
-			* after its origin — an immediate check would misread that first frame as
-			* a new subagent and pop this page on every thread creation. The timer
-			* re-evaluates the ORIGINAL baseline against the live snapshot; by then
-			* the title filter (isSideThreadSummary) sees the settled label.
-			*/
-			const listBaselineRef = (0, react.useRef)(void 0);
+			(0, react.useRef)(void 0);
 			const autoOpenPendingRef = (0, react.useRef)(null);
-			(0, react.useEffect)(() => {
-				const prev = listBaselineRef.current;
-				listBaselineRef.current = sessionList;
-				if (sessionId === void 0 || prev === void 0) return;
-				if (autoOpenPendingRef.current !== null) return;
-				if (!detectNewDirectSubagent(prev, sessionList, sessionId)) return;
-				const baseline = prev;
-				const timer = window.setTimeout(() => {
-					autoOpenPendingRef.current = null;
-					if (!detectNewDirectSubagent(baseline, ctx.sessions.list.getSnapshot(), sessionId)) return;
-					if (!store.getPrefs().autoOpenSubagent) return;
-					if (ctx.get("betterSidebar")?.isTabEnabled("subagent") === false) return;
-					store.reduce((s) => s.panelOpen ? s : togglePanel(s));
-					store.reduce((s) => ({
-						...s,
-						activePane: firstLeaf(s.splits).id
-					}));
-					ctx.get("betterSidebar")?.openTab({
-						type: "subagent",
-						title: t("subagent")
-					});
-				}, AUTO_OPEN_DEBOUNCE_MS);
-				autoOpenPendingRef.current = {
-					baseline,
-					timer
-				};
-			}, [
+			(0, react.useEffect)(() => {}, [
 				sessionList,
 				sessionId,
 				store,
@@ -19208,33 +18630,8 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				if (pending !== null) window.clearTimeout(pending.timer);
 				autoOpenPendingRef.current = null;
 			}, [sessionId]);
-			/**
-			* Job auto-activation: the moment a NEW background job appears for the
-			* current conversation (a job id the previous snapshot lacked), the
-			* auto-open pref is on, and the Jobs tab type is enabled, open the panel
-			* (if collapsed) and focus the Jobs page. Unlike the subagent trigger
-			* (0 → N only), ANY new job id triggers: the agent may start several
-			* jobs in one session, and each should surface. A fresh page load never
-			* triggers — its baseline starts at the current snapshot.
-			*/
-			const jobBaselineRef = (0, react.useRef)(void 0);
-			(0, react.useEffect)(() => {
-				const prev = jobBaselineRef.current;
-				jobBaselineRef.current = sessionList;
-				if (sessionId === void 0 || prev === void 0) return;
-				if (!detectNewJob(prev, sessionList, sessionId)) return;
-				if (!store.getPrefs().autoOpenJobs) return;
-				if (ctx.get("betterSidebar")?.isTabEnabled("subagent") === false) return;
-				store.reduce((s) => s.panelOpen ? s : togglePanel(s));
-				store.reduce((s) => ({
-					...s,
-					activePane: firstLeaf(s.splits).id
-				}));
-				ctx.get("betterSidebar")?.openTab({
-					type: "subagent",
-					title: t("subagent")
-				});
-			}, [
+			(0, react.useRef)(void 0);
+			(0, react.useEffect)(() => {}, [
 				sessionList,
 				sessionId,
 				store,
@@ -19252,20 +18649,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			* that session's own layout untouched.
 			*/
 			const subagentJumpRef = (0, react.useRef)(void 0);
-			(0, react.useEffect)(() => {
-				const pending = subagentJumpRef.current;
-				if (pending === void 0 || sessionId !== pending) return;
-				subagentJumpRef.current = void 0;
-				store.reduce((s) => s.panelOpen ? s : togglePanel(s));
-				store.reduce((s) => ({
-					...s,
-					activePane: firstLeaf(s.splits).id
-				}));
-				ctx.get("betterSidebar")?.openTab({
-					type: "subagent",
-					title: t("subagent")
-				});
-			}, [
+			(0, react.useEffect)(() => {}, [
 				sessionId,
 				store,
 				ctx
@@ -19275,6 +18659,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				right: 0
 			});
 			const [centerMeasured, setCenterMeasured] = (0, react.useState)(false);
+			const clusterRef = (0, react.useRef)(null);
 			const centerColRef = (0, react.useRef)(null);
 			const draggingRef = (0, react.useRef)(false);
 			const measureCenter = (0, react.useCallback)(() => {
@@ -19290,10 +18675,31 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					left: rect.left,
 					right: rect.right
 				};
+				const cluster = clusterRef.current;
+				if (cluster !== null) {
+					let gutter = window.innerWidth - rect.right + 10;
+					if (document.querySelector("[data-slot=\"sidebar.right.pane.tab\"]") === null) {
+						let anchor = null;
+						for (const button of document.querySelectorAll("header button")) {
+							const box = button.getBoundingClientRect();
+							if (box.width === 0 || box.height === 0 || box.bottom > 44 || box.right > window.innerWidth) continue;
+							if (anchor === null || box.right > anchor.getBoundingClientRect().right) anchor = button;
+						}
+						if (anchor !== null) gutter = window.innerWidth - anchor.getBoundingClientRect().right - 4 - 28;
+					}
+					cluster.style.setProperty("right", `${gutter}px`);
+				}
+				const rightPanel = document.querySelector("[data-sidebar-right-panel=\"push\"][data-sidebar-right-open=\"true\"]");
+				const docked = rightPanel !== null && bottomOpenRef.current && !narrowRef.current;
+				if (rightPanel !== null) dockLeftRef.current = rightPanel.getBoundingClientRect().left;
+				if (docked !== dockRightRef.current) {
+					dockRightRef.current = docked;
+					setDockRight(docked);
+				}
 				const bottom = bottomRef.current;
 				if (bottom !== null) {
-					bottom.style.setProperty("left", `${rect.left}px`);
-					bottom.style.setProperty("right", `${window.innerWidth - rect.right}px`);
+					bottom.style.setProperty("left", `${docked ? dockLeftRef.current : rect.left}px`);
+					bottom.style.setProperty("right", `${docked ? 0 : window.innerWidth - rect.right}px`);
 				}
 				setCenterMeasured((prev) => prev ? prev : true);
 			}, []);
@@ -19302,8 +18708,14 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				let observer;
 				const locate = () => {
 					if (disposed) return;
-					const col = document.querySelector("#root [data-slot=\"conversation\"]")?.parentElement;
-					if (col === void 0 || !col.isConnected) {
+					let col = (document.querySelector("#root [data-slot=\"main.conversation\"]") ?? document.querySelector("#root [data-slot=\"conversation\"]"))?.parentElement;
+					while (col !== null && col !== void 0 && col !== document.body) {
+						const rect = col.getBoundingClientRect();
+						if (rect.width > 0 && rect.height > 0) break;
+						col = col.parentElement;
+					}
+					if (col === document.body) col = null;
+					if (col === void 0 || col === null || !col.isConnected) {
 						if (centerColRef.current !== null) {
 							centerColRef.current = null;
 							observer?.disconnect();
@@ -19518,8 +18930,11 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				};
 				panelRef.current?.style.setProperty("width", `${width}px`);
 				bottomRef.current?.style.setProperty("height", `${height}px`);
-				bottomRef.current?.style.setProperty("right", `${window.innerWidth - centerRectRef.current.right + (width - (state?.width ?? 0))}px`);
-				const bottomPush = !narrow && state?.bottomOpen === true ? height + keyboardInset : 0;
+				if (dockRightRef.current) {
+					bottomRef.current?.style.setProperty("right", "0px");
+					document.documentElement.style.setProperty("--dsh-bottom-dock-height", `${height}px`);
+				} else bottomRef.current?.style.setProperty("right", `${window.innerWidth - centerRectRef.current.right + (width - (state?.width ?? 0))}px`);
+				const bottomPush = !narrow && !dockRightRef.current && state?.bottomOpen === true ? height + keyboardInset : 0;
 				writeGeometry(width, bottomPush);
 			};
 			const dragFrame = (0, react.useRef)(null);
@@ -19632,7 +19047,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					const last = lastDragSize.current;
 					const { width: adoptedWidth, height: adoptedHeight } = layoutPushSize({
 						narrow,
-						panelOpen: state?.panelOpen === true,
+						panelOpen: RIGHT_PANEL_ENABLED,
 						bottomOpen: state?.bottomOpen === true,
 						width: last?.width ?? state?.width ?? 0,
 						bottomHeight: last?.height ?? state?.bottomHeight ?? 0,
@@ -19649,17 +19064,18 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			(0, react.useEffect)(() => {
 				const { width, height } = layoutPushSize({
 					narrow,
-					panelOpen: snapshot.state?.panelOpen === true,
+					panelOpen: RIGHT_PANEL_ENABLED,
 					bottomOpen: snapshot.state?.bottomOpen === true,
 					width: snapshot.state?.width ?? 0,
 					bottomHeight: snapshot.state?.bottomHeight ?? 0,
 					viewportWidth: viewport.width,
 					viewportHeight: layoutViewportHeight
 				});
-				const bottomPush = !narrow && snapshot.state?.bottomOpen === true ? height + keyboardInset : 0;
+				const bottomPush = !narrow && !dockRight && snapshot.state?.bottomOpen === true ? height + keyboardInset : 0;
 				writeGeometry(width, bottomPush);
 			}, [
 				narrow,
+				dockRight,
 				snapshot.state?.panelOpen,
 				snapshot.state?.width,
 				snapshot.state?.bottomOpen,
@@ -19668,6 +19084,38 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				layoutViewportHeight,
 				keyboardInset
 			]);
+			(0, react.useEffect)(() => {
+				if (!(dockRight && snapshot.state?.bottomOpen === true)) {
+					document.body.removeAttribute("data-dsh-bottom-docked");
+					document.documentElement.style.removeProperty("--dsh-bottom-dock-height");
+					return;
+				}
+				const { height } = layoutPushSize({
+					narrow,
+					panelOpen: false,
+					bottomOpen: true,
+					width: 0,
+					bottomHeight: snapshot.state?.bottomHeight ?? 0,
+					viewportWidth: viewport.width,
+					viewportHeight: layoutViewportHeight
+				});
+				document.body.setAttribute("data-dsh-bottom-docked", "");
+				document.documentElement.style.setProperty("--dsh-bottom-dock-height", `${height}px`);
+				return () => {
+					document.body.removeAttribute("data-dsh-bottom-docked");
+					document.documentElement.style.removeProperty("--dsh-bottom-dock-height");
+				};
+			}, [
+				dockRight,
+				narrow,
+				snapshot.state?.bottomOpen,
+				snapshot.state?.bottomHeight,
+				viewport.width,
+				layoutViewportHeight
+			]);
+			(0, react.useEffect)(() => {
+				measureCenter();
+			}, [measureCenter, snapshot.state?.bottomOpen]);
 			(0, react.useEffect)(() => {
 				return () => {
 					document.documentElement.style.removeProperty("--dsh-sidebar-width");
@@ -19754,10 +19202,11 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			if (state === void 0 || sessionId === void 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				"data-dsh-panel-host": true,
 				...osFileDragShield,
-				children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					ref: clusterRef,
 					className: sidebar_module_css_default.toggleCluster,
 					"data-dsh-toggle-cluster": true,
-					children: [!narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+					children: !narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
 						label: t("noSession"),
 						side: "bottom",
 						delayMs: 500,
@@ -19768,23 +19217,12 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 							"aria-label": t("noSession"),
 							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconPanelBottomOutline16, {})
 						})
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
-						label: t("noSession"),
-						side: "bottom",
-						delayMs: 500,
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: sidebar_module_css_default.toggleButton,
-							"aria-disabled": "true",
-							"aria-label": t("noSession"),
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconPanelRightOutline16, {})
-						})
-					})]
+					})
 				})
 			});
 			const bottomPanelHeight = layoutPushSize({
 				narrow,
-				panelOpen: state.panelOpen,
+				panelOpen: RIGHT_PANEL_ENABLED,
 				bottomOpen: true,
 				width: state.width,
 				bottomHeight: state.bottomHeight,
@@ -19861,7 +19299,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				onReferenceFile: referenceInChat,
 				ctx,
 				store,
-				visible: placement === "float" ? true : placement === "bottom" ? state.bottomOpen && active : state.panelOpen && active,
+				visible: placement === "float" ? true : placement === "bottom" ? state.bottomOpen && active : RIGHT_PANEL_ENABLED,
 				onSubagentJump: (childSessionId) => {
 					subagentJumpRef.current = childSessionId;
 				},
@@ -19875,10 +19313,11 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				"data-dsh-panel-host": true,
 				...osFileDragShield,
 				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						ref: clusterRef,
 						className: sidebar_module_css_default.toggleCluster,
 						"data-dsh-toggle-cluster": true,
-						children: [!narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+						children: !narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
 							label: state.bottomOpen ? t("collapseBottomPanel") : t("expandBottomPanel"),
 							side: "bottom",
 							delayMs: 500,
@@ -19891,24 +19330,11 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 								},
 								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconPanelBottomOutline16, {})
 							})
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
-							label: state.panelOpen ? t("collapse") : t("expand"),
-							side: "bottom",
-							delayMs: 500,
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: sidebar_module_css_default.toggleButton,
-								"aria-label": state.panelOpen ? t("collapse") : t("expand"),
-								onClick: () => {
-									store.reduce(togglePanel);
-								},
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconPanelRightOutline16, {})
-							})
-						})]
+						})
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						ref: panelRef,
-						className: clsx(sidebar_module_css_default.panel, !state.panelOpen && sidebar_module_css_default.panelHidden),
+						className: clsx(sidebar_module_css_default.panel, sidebar_module_css_default.panelHidden),
 						"data-dsh-panel": true,
 						style: {
 							width: narrow ? "100vw" : Math.min(state.width, window.innerWidth),
@@ -19968,46 +19394,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 									getTabBadge: tabBadgeOf
 								})
 							}),
-							!narrow && state.panelOpen && state.bottomOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-								className: sidebar_module_css_default.cornerHandle,
-								"data-dragging": draggingCorner || void 0,
-								onPointerDown: (event) => {
-									event.preventDefault();
-									event.currentTarget.setPointerCapture(event.pointerId);
-									dragCommitted.current = false;
-									cornerDrag.current = {
-										startX: event.clientX,
-										startY: event.clientY,
-										startWidth: state.width,
-										startHeight: state.bottomHeight
-									};
-									setDraggingCorner(true);
-								},
-								onPointerMove: (event) => {
-									if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-									const { startX, startY, startWidth, startHeight } = cornerDrag.current;
-									const width = clampWidth(startWidth + (startX - event.clientX));
-									const height = pushedBottomHeight(true, clampHeight(startHeight + (startY - event.clientY)));
-									scheduleDrag(width, height);
-								},
-								onPointerUp: (event) => {
-									if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-									if (dragCommitted.current) return;
-									dragCommitted.current = true;
-									event.currentTarget.releasePointerCapture(event.pointerId);
-									const { startX, startY, startWidth, startHeight } = cornerDrag.current;
-									const width = clampWidth(startWidth + (startX - event.clientX));
-									const height = pushedBottomHeight(true, clampHeight(startHeight + (startY - event.clientY)));
-									commitDrag(width, height, (s) => setBottomHeight(setWidth(s, width), height));
-									setDraggingCorner(false);
-								},
-								onPointerCancel: (event) => {
-									abortDrag(() => setDraggingCorner(false), event);
-								},
-								onLostPointerCapture: () => {
-									abortDrag(() => setDraggingCorner(false));
-								}
-							})
+							RIGHT_PANEL_ENABLED
 						]
 					}),
 					!narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -20017,10 +19404,10 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						"data-dsh-bottom-panel": true,
 						style: {
 							height: bottomPanelHeight,
-							left: centerRectRef.current.left,
+							left: dockRight ? dockLeftRef.current : centerRectRef.current.left,
 							bottom: keyboardInset > 0 ? `${keyboardInset}px` : void 0,
-							right: window.innerWidth - centerRectRef.current.right,
-							borderRight: state.panelOpen ? "1px solid var(--dsw-alias-border-l2)" : void 0,
+							right: dockRight ? 0 : window.innerWidth - centerRectRef.current.right,
+							borderRight: void 0,
 							visibility: centerMeasured ? void 0 : "hidden"
 						},
 						"data-dragging": draggingBottom || draggingCorner || void 0,
@@ -20071,7 +19458,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 									onClick: () => {
 										store.reduce(toggleBottomPanel);
 									},
-									children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseFill14, {})
+									children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseFillRegular, {})
 								})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -20092,29 +19479,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 							})
 						]
 					}),
-					state.floats.map((float) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FreeWindow, {
-						float,
-						renderTab: (tab, active, paneId) => renderTab(tab, active, paneId, "float"),
-						getTabIcon: tabIconOf,
-						onRaise: () => {
-							store.reduce((s) => raiseFloat(s, float.id));
-						},
-						onMove: (x, y) => {
-							store.reduce((s) => moveFloat(s, float.id, x, y));
-						},
-						onResize: (w, h) => {
-							store.reduce((s) => resizeFloat(s, float.id, w, h));
-						},
-						onDock: (paneId) => {
-							store.reduce((s) => dockFloat(s, float.id, paneId ?? void 0));
-						},
-						onClose: () => {
-							ctx.get("betterSidebar")?.closeTab(float.tab.id, sessionId === void 0 ? void 0 : {
-								sessionId,
-								cwd
-							});
-						}
-					}, float.id)),
+					RIGHT_PANEL_ENABLED,
 					floatHint !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: sidebar_module_css_default.floatDropHint,
 						style: {
@@ -20905,7 +20270,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						className: SideCardSection_module_css_default.selectAnchorText,
 						children: selected.length === 0 ? placeholder ?? "—" : selected.map((option) => textOf(option.title)).join(", ")
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronDownOutline14, { size: 12 })
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronDownOutlineRegular, { size: 12 })
 				]
 			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Menu, {
@@ -21269,7 +20634,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						className: SideCardSection_module_css_default.cardSettings,
 						"aria-label": `${props.title} ${t("settingsPopup")}`,
 						onClick: props.onOpenSettings,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutline16, { size: 12 }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("settingsPopup") })]
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutlineRegular, { size: 12 }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("settingsPopup") })]
 					})]
 				});
 			};
@@ -21433,7 +20798,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 										onClick: () => {
 											setStripSettingsOpen(true);
 										},
-										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutline16, { size: 14 })
+										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutlineRegular, { size: 14 })
 									})]
 								})]
 							})
@@ -21470,7 +20835,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 									className: SideCardSection_module_css_default.cardTop,
 									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: SideCardSection_module_css_default.cardIconChip,
-										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutline16, { size: 16 })
+										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 16 })
 									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: SideCardSection_module_css_default.cardTitle,
 										children: t("addPluginsTabCard")
@@ -21513,7 +20878,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 									className: SideCardSection_module_css_default.cardTop,
 									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: SideCardSection_module_css_default.cardIconChip,
-										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutline16, { size: 16 })
+										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 16 })
 									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: SideCardSection_module_css_default.cardTitle,
 										children: t("addPluginsViewerCard")
@@ -21621,8 +20986,8 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:K:\work\project\dsh\dsh-sidebar-lite\src\client\layout.css.mjs
-		const css = "/**\n * Layout push: when a panel is open it OCCUPIES the layout instead of\n * floating over it — the app shell (#root, the AppFrame three-column grid)\n * gives up space. Only the center column is flexible (1fr), so the right\n * panel's width squeeze (margin-right on #root) lands exactly on the\n * conversation output and the input bar, like a VSCode sidebar.\n *\n * The width rides `calc(100% - var(...))` instead of a bare margin on a\n * full-width box: some desktop shells (DSH Desktop, #208) set #root to\n * width:100%, where a margin would overflow the viewport additively —\n * the calc keeps the box at exactly 100% minus the push in every shell.\n * Width and margin transition in lockstep (same variable, same duration\n * and easing), so expand/collapse animates the content width exactly as\n * the bare-margin version did.\n *\n * The bottom panel squeezes ONLY the center column — it must not cover the\n * app's own left sidebar or the right panel. The anchor is the frame's\n * center grid item via its stable data attribute ([data-pane=\"conversation\"]\n * on the centerCol inside [data-dsh-frame]), not a positional path: the\n * frame's child order also contains an overlay layer and drag handles\n * (verified against a live DSH 0.1.x page), so nth-child is brittle. A\n * stretched grid item shrinks by its margins, so the conversation content\n * (output + input bar) lifts without touching the sidebars.\n *\n * The sizes ride CSS variables updated by the Sidebar shell (0 while\n * collapsed); expand/collapse animates both the margins and the panel\n * slides on the same theme duration. Drags disable the transition so the\n * layout tracks the pointer.\n */\n#root {\n  margin-right: var(--dsh-sidebar-width, 0px);\n  width: calc(100% - var(--dsh-sidebar-width, 0px));\n  transition:\n    margin-right var(--ds-transition-duration-slow) var(--ds-ease-in-out),\n    width var(--ds-transition-duration-slow) var(--ds-ease-in-out);\n}\n\n/* The AppFrame's center column, anchored by data attributes (see above).\n   Composite selector: DSH 0.1.x versions name the center grid item\n   `[data-pane=\"conversation\"]`, while rc.8-era shells put a\n   `[data-slot=\"conversation\"]` child inside it — both selectors resolve to\n   the SAME element on live pages (verified), and keeping both future-proofs\n   the rule against a host rename without touching shell-specific markup. */\n#root [data-dsh-frame] > [data-pane=\"conversation\"],\n#root :has(> [data-slot=\"conversation\"]) {\n  margin-bottom: var(--dsh-sidebar-height, 0px);\n  /* Grid/flex items default to min-height:auto. A long unbreakable token\n     (OAuth URL) then grows this column past the viewport and clips the\n     composer + left-rail Settings row. min-height:0 lets the cell shrink;\n     overflow-wrap lets the token wrap instead of forcing its intrinsic\n     size. The host's own descendants remain responsible for scrolling. */\n  min-height: 0;\n  overflow-wrap: anywhere;\n  transition: margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);\n}\n\n/* When the sidebar is collapsed, the toggle cluster reclaims the top-right\n   corner. Push the DSH session header's right padding out so its right-aligned\n   utilities (the \"Session log\" download capsule) yield the corner instead of\n   hiding under the cluster. The header default right-pads 28px; the 2-button\n   cluster spans right 10→70px, so 78px clears it with an 8px gap. Anchor on\n   the header's slot host wrapper ([data-slot=\"conversation.session.header\"])\n   rather than a positional path: DSH 0.1.x nests the header several levels\n   under the center column. The Sidebar shell toggles the body attribute with\n   the panel open state. */\nbody[data-dsh-sidebar-collapsed] [data-slot=\"conversation.session.header\"] > header {\n  padding-right: 78px;\n}\n\nbody[data-dsh-sidebar-dragging] #root,\nbody[data-dsh-sidebar-dragging] #root [data-dsh-frame] > [data-pane=\"conversation\"],\nbody[data-dsh-sidebar-dragging] #root :has(> [data-slot=\"conversation\"]) {\n  transition: none;\n}\n\n/* DSH 0.1.x gives external settings sections a generic gear and exposes no\n   icon field in the settings.section contract. settings-nav-icon.ts marks\n   only this plugin's localized row; render the requested Lucide\n   gallery-horizontal-end SVG as a currentColor mask so it follows the native\n   nav hover/active colors without changing the shell's 16px icon rhythm. */\n[data-dsh-sidebar-lite-settings-nav] > svg:first-child {\n  display: none;\n}\n\n[data-dsh-sidebar-lite-settings-nav]::before {\n  content: '';\n  flex: none;\n  width: 16px;\n  height: 16px;\n  background: currentColor;\n  -webkit-mask: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 7v10'/%3E%3Cpath d='M6 5v14'/%3E%3Crect width='12' height='18' x='10' y='3' rx='2'/%3E%3C/svg%3E\") center / contain no-repeat;\n  mask: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 7v10'/%3E%3Cpath d='M6 5v14'/%3E%3Crect width='12' height='18' x='10' y='3' rx='2'/%3E%3C/svg%3E\") center / contain no-repeat;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  #root,\n  #root [data-dsh-frame] > [data-pane=\"conversation\"],\n  #root :has(> [data-slot=\"conversation\"]) {\n    transition: none;\n  }\n}\n";
+		//#region \0dsh-css:/workspace/1/dsh/packages/dsh-sidebar-lite/src/client/layout.css.mjs
+		const css = "/**\n * Layout push: when a panel is open it OCCUPIES the layout instead of\n * floating over it — the app shell (#root, the AppFrame three-column grid)\n * gives up space. Only the center column is flexible (1fr), so the right\n * panel's width squeeze (margin-right on #root) lands exactly on the\n * conversation output and the input bar, like a VSCode sidebar.\n *\n * The width rides `calc(100% - var(...))` instead of a bare margin on a\n * full-width box: some desktop shells (DSH Desktop, #208) set #root to\n * width:100%, where a margin would overflow the viewport additively —\n * the calc keeps the box at exactly 100% minus the push in every shell.\n * Width and margin transition in lockstep (same variable, same duration\n * and easing), so expand/collapse animates the content width exactly as\n * the bare-margin version did.\n *\n * The bottom panel squeezes ONLY the center column — it must not cover the\n * app's own left sidebar or the right panel. The anchor is the frame's\n * center grid item via its stable data attribute ([data-pane=\"conversation\"]\n * on the centerCol inside [data-dsh-frame]), not a positional path: the\n * frame's child order also contains an overlay layer and drag handles\n * (verified against a live DSH 0.1.x page), so nth-child is brittle. A\n * stretched grid item shrinks by its margins, so the conversation content\n * (output + input bar) lifts without touching the sidebars.\n *\n * The sizes ride CSS variables updated by the Sidebar shell (0 while\n * collapsed); expand/collapse animates both the margins and the panel\n * slides on the same theme duration. Drags disable the transition so the\n * layout tracks the pointer.\n */\n#root {\n  margin-right: var(--dsh-sidebar-width, 0px);\n  width: calc(100% - var(--dsh-sidebar-width, 0px));\n  transition:\n    margin-right var(--ds-transition-duration-slow) var(--ds-ease-in-out),\n    width var(--ds-transition-duration-slow) var(--ds-ease-in-out);\n}\n\n/* The AppFrame's center column, anchored by data attributes (see above).\n   Composite selector: DSH 0.1.x versions name the center grid item\n   `[data-pane=\"conversation\"]`, while rc.8-era shells put a\n   `[data-slot=\"conversation\"]` child inside it — both selectors resolve to\n   the SAME element on live pages (verified), and keeping both future-proofs\n   the rule against a host rename without touching shell-specific markup. */\n#root [data-dsh-frame] > [data-pane=\"conversation\"],\n#root :has(> [data-slot=\"main\"]),\n#root :has(> [data-slot=\"conversation\"]) {\n  margin-bottom: var(--dsh-sidebar-height, 0px);\n  /* Grid/flex items default to min-height:auto. A long unbreakable token\n     (OAuth URL) then grows this column past the viewport and clips the\n     composer + left-rail Settings row. min-height:0 lets the cell shrink;\n     overflow-wrap lets the token wrap instead of forcing its intrinsic\n     size. The host's own descendants remain responsible for scrolling. */\n  min-height: 0;\n  overflow-wrap: anywhere;\n  transition: margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);\n}\n\n/* When the sidebar is collapsed, the toggle cluster reclaims the top-right\n   corner. Push the DSH session header's right padding out so its right-aligned\n   utilities (the \"Session log\" download capsule) yield the corner instead of\n   hiding under the cluster. The header default right-pads 28px; the 2-button\n   cluster spans right 10→70px, so 78px clears it with an 8px gap. Anchor on\n   the header's slot host wrapper ([data-slot=\"conversation.session.header\"])\n   rather than a positional path: DSH 0.1.x nests the header several levels\n   under the center column, while 0.2 renders the <header> OUTSIDE that slot\n   (the slot only supplies the title row), so the ancestor form uses :has().\n   The Sidebar shell toggles the body attribute with the panel open state. */\nbody[data-dsh-sidebar-collapsed] header:has([data-slot=\"conversation.session.header\"]),\nbody[data-dsh-sidebar-collapsed] [data-slot=\"conversation.session.header\"] > header {\n  padding-right: 60px;\n}\n\nbody[data-dsh-sidebar-dragging] #root,\nbody[data-dsh-sidebar-dragging] #root [data-dsh-frame] > [data-pane=\"conversation\"],\nbody[data-dsh-sidebar-dragging] #root :has(> [data-slot=\"main\"]),\nbody[data-dsh-sidebar-dragging] #root :has(> [data-slot=\"conversation\"]) {\n  transition: none;\n}\n\n/* DSH 0.1.x gives external settings sections a generic gear and exposes no\n   icon field in the settings.section contract. settings-nav-icon.ts marks\n   only this plugin's localized row; render the requested Lucide\n   gallery-horizontal-end SVG as a currentColor mask so it follows the native\n   nav hover/active colors without changing the shell's 16px icon rhythm. */\n[data-dsh-sidebar-lite-settings-nav] > svg:first-child {\n  display: none;\n}\n\n[data-dsh-sidebar-lite-settings-nav]::before {\n  content: '';\n  flex: none;\n  width: 16px;\n  height: 16px;\n  background: currentColor;\n  -webkit-mask: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 7v10'/%3E%3Cpath d='M6 5v14'/%3E%3Crect width='12' height='18' x='10' y='3' rx='2'/%3E%3C/svg%3E\") center / contain no-repeat;\n  mask: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 7v10'/%3E%3Cpath d='M6 5v14'/%3E%3Crect width='12' height='18' x='10' y='3' rx='2'/%3E%3C/svg%3E\") center / contain no-repeat;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  #root,\n  #root [data-dsh-frame] > [data-pane=\"conversation\"],\n  #root :has(> [data-slot=\"main\"]),\n  #root :has(> [data-slot=\"conversation\"]) {\n    transition: none;\n  }\n}\n\n/* Terminal docked under the native right Sidebar (Sidebar.tsx sets the body\n   attribute while the column is open and the bottom panel is expanded). The\n   native column's absolute panel gives up exactly the terminal's height, so\n   its file tree ends above the terminal instead of the conversation losing\n   height at the bottom. `bottom` overrides the panel's `inset: 0`; the height\n   variable is written by the shell (and per frame during a height drag). */\nbody[data-dsh-bottom-docked] [data-sidebar-right-panel=\"push\"] {\n  transition: bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);\n}\nbody[data-dsh-bottom-docked] [data-sidebar-right-panel=\"push\"][data-sidebar-right-open=\"true\"] {\n  bottom: var(--dsh-bottom-dock-height, 0px);\n}\nbody[data-dsh-sidebar-dragging] [data-sidebar-right-panel=\"push\"] {\n  transition: none;\n}\n";
 		const tagId = "dsh-external/dsh-sidebar-lite/layout.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -21855,14 +21220,6 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						unmount();
 					};
 				}, "dsh-sidebar-lite: sidebar mount");
-				ctx.effect(() => {
-					try {
-						return registerTurnTailInterception(ctx, sidebarStore);
-					} catch (error) {
-						fail("interception", error);
-						return () => {};
-					}
-				}, "dsh-sidebar-lite: turn-tail interception");
 				ctx.effect(() => {
 					try {
 						return registerOpenPathInterception(ctx, sidebarStore);
