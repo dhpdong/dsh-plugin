@@ -1389,6 +1389,8 @@ window.__ModuleLoader__.load({
 
       function resetRoot() {
         writeRoot('')
+        writeTermCwd('')
+
         var state = ctxState(ctx)
         setRoot(state !== undefined && typeof state.cwd === 'string' ? state.cwd : '/')
       }
@@ -1483,6 +1485,36 @@ window.__ModuleLoader__.load({
     // a fresh shell per session.
     var SHARED_TERM_SESSION = '__nfo_shared_terminal__'
     var SHARED_TERM_TAB = 'shared'
+    var TERM_CWD_KEY = 'dsh.files.termCwd'
+
+    function readTermCwd() {
+      try {
+        var value = window.localStorage.getItem(TERM_CWD_KEY)
+        return typeof value === 'string' && value.charAt(0) === '/' ? value : undefined
+      } catch (error) { return undefined }
+    }
+
+    function writeTermCwd(path) {
+      try { window.localStorage.setItem(TERM_CWD_KEY, path) } catch (error) { /* ignore */ }
+    }
+
+    /**
+     * The cwd of the shared shell. It must be STABLE across workspace switches
+     * (the host respawns a terminal whose cwd changed), so an explicitly picked
+     * root wins, then the cwd the shared shell was first started in, and only
+     * on the very first attach the current session's workspace — which is then
+     * remembered.
+     */
+    function sharedTerminalCwd() {
+      var root = readRoot()
+      if (root !== undefined) return root
+      var stored = readTermCwd()
+      if (stored !== undefined) return stored
+      var state = ctxState(currentCtx)
+      if (state === undefined || typeof state.cwd !== 'string' || state.cwd === '') return undefined
+      writeTermCwd(state.cwd)
+      return state.cwd
+    }
 
     function installTerminalCwd() {
       var Native = window.WebSocket
@@ -1490,10 +1522,10 @@ window.__ModuleLoader__.load({
       var Patched = function (url, protocols) {
         var next = url
         try {
-          var root = readRoot()
-          if (root !== undefined && typeof url === 'string' && url.indexOf('/sidebar/ws/terminal') !== -1 && url.indexOf('uuid=') === -1) {
+          var cwd = sharedTerminalCwd()
+          if (cwd !== undefined && typeof url === 'string' && url.indexOf('/sidebar/ws/terminal') !== -1 && url.indexOf('uuid=') === -1) {
             var parsed = new URL(url, window.location.href)
-            parsed.searchParams.set('cwd', root)
+            parsed.searchParams.set('cwd', cwd)
             // Same pty for every workspace: switching conversations reattaches
             // instead of respawning (the host keys a terminal by these two).
             parsed.searchParams.set('sessionId', SHARED_TERM_SESSION)
