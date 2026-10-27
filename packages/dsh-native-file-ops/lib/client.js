@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
   factory: function (require) {
     var module = { exports: {} }
     var exports = module.exports
+    var React = require('react')
     var CSS = `
 .nfo-menu{position:fixed;z-index:2147483000;min-width:200px;padding:4px;border:1px solid var(--dsw-alias-border-l1,#333);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#1e1e24);box-shadow:0 8px 30px rgba(0,0,0,.45);font:13px/1.5 system-ui,sans-serif;color:var(--dsw-alias-label-primary,#eee)}
 .nfo-menu button{display:flex;width:100%;align-items:center;gap:8px;padding:6px 8px;border:0;border-radius:5px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;white-space:nowrap}
@@ -35,6 +36,22 @@ window.__ModuleLoader__.load({
 .nfo-dialog .nfo-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .nfo-dialog button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 .nfo-dialog button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
+.nfo-doc-edit{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);cursor:pointer}
+.nfo-doc-edit:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#eee)}
+.nfo-edit-overlay{position:fixed;inset:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)}
+.nfo-edit{display:flex;flex-direction:column;width:min(900px,92vw);height:min(72vh,720px);border:1px solid var(--dsw-alias-border-l1,#333);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#18181d);box-shadow:0 24px 70px rgba(0,0,0,.55);color:var(--dsw-alias-label-primary,#eee);font:13px/1.5 system-ui,sans-serif;overflow:hidden}
+.nfo-edit-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l1,#333);flex:0 0 auto}
+.nfo-edit-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dsw-alias-label-secondary,#aaa)}
+.nfo-edit-dirty{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-button-info-fill,#4a7dff);visibility:hidden;flex:none}
+.nfo-edit-dirty[data-dirty]{visibility:visible}
+.nfo-edit-x{width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer}
+.nfo-edit-x:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08))}
+.nfo-edit-text{box-sizing:border-box;flex:1 1 auto;min-height:0;width:100%;padding:12px 14px;border:0;outline:none;resize:none;background:transparent;color:inherit;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
+.nfo-edit-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--dsw-alias-border-l1,#333);flex:0 0 auto}
+.nfo-edit-hint{flex:1 1 auto;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.nfo-edit-foot button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.nfo-edit-foot button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
+.nfo-edit-foot button:disabled{opacity:.5;cursor:default}
 `
     var locale = 'en'
     var isZh = function () { return String(locale).toLowerCase().indexOf('zh') === 0 }
@@ -408,11 +425,200 @@ window.__ModuleLoader__.load({
     }
 
 
-    exports.inject = ['sessions', 'locale', 'uiSession']
+
+    // ── In-place text editing for the native document preview ─────────────
+    // The native right-Sidebar preview is read-only. A small "edit" action in
+    // the document header opens a raw-text editor (one textarea over the
+    // fence-safe /sidebar/api/fs.read|fs.write carrier), saves in place, and
+    // asks the preview to reload. Binary or truncated files are refused so a
+    // truncated read can never overwrite the rest of the file.
+
+    var editorOverlay = null
+
+    function PencilGlyph() {
+      return React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true' },
+        React.createElement('path', { d: 'M10.8 2.2l3 3L6 13H3v-3z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, strokeLinejoin: 'round' }))
+    }
+
+    function reloadTextPreview() {
+      var buttons = document.querySelectorAll('[data-textpreview-tool="reload"]')
+      for (var i = 0; i < buttons.length; i += 1) {
+        var rect = buttons[i].getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) {
+          buttons[i].click()
+          return
+        }
+      }
+    }
+
+    function openTextEditor(ctx, path) {
+      sidebarCall(ctx, 'fs.read', { path: path }).then(function (value) {
+        if (value.kind !== 'text') {
+          toast(L('该文件不是文本，无法编辑', 'Not a text file'))
+          return
+        }
+        if (value.truncated === true) {
+          toast(L('文件过大，暂不支持在浏览器中编辑', 'File too large to edit here'))
+          return
+        }
+        showTextEditor(ctx, path, value.content)
+      }).catch(function (error) {
+        toast(String(error && error.message ? error.message : error))
+      })
+    }
+
+    function showTextEditor(ctx, path, initial) {
+      if (editorOverlay !== null) {
+        editorOverlay.remove()
+        editorOverlay = null
+      }
+      var overlay = document.createElement('div')
+      overlay.className = 'nfo-edit-overlay'
+
+      var dialog = document.createElement('div')
+      dialog.className = 'nfo-edit'
+
+      var head = document.createElement('div')
+      head.className = 'nfo-edit-head'
+      var pathNode = document.createElement('span')
+      pathNode.className = 'nfo-edit-path'
+      pathNode.textContent = path
+      pathNode.title = path
+      var dirtyDot = document.createElement('span')
+      dirtyDot.className = 'nfo-edit-dirty'
+      var closeButton = document.createElement('button')
+      closeButton.type = 'button'
+      closeButton.className = 'nfo-edit-x'
+      closeButton.textContent = '×'
+      closeButton.setAttribute('aria-label', L('关闭', 'Close'))
+      head.appendChild(pathNode)
+      head.appendChild(dirtyDot)
+      head.appendChild(closeButton)
+
+      var textarea = document.createElement('textarea')
+      textarea.className = 'nfo-edit-text'
+      textarea.spellcheck = false
+      textarea.wrap = 'off'
+      textarea.value = initial
+      textarea.setAttribute('aria-label', L('文件内容', 'File content'))
+
+      var foot = document.createElement('div')
+      foot.className = 'nfo-edit-foot'
+      var hint = document.createElement('span')
+      hint.className = 'nfo-edit-hint'
+      hint.textContent = L('Ctrl+S 保存 · Esc 取消', 'Ctrl+S save · Esc cancel')
+      var cancelButton = document.createElement('button')
+      cancelButton.type = 'button'
+      cancelButton.textContent = L('取消', 'Cancel')
+      var saveButton = document.createElement('button')
+      saveButton.type = 'button'
+      saveButton.className = 'nfo-primary'
+      saveButton.textContent = L('保存', 'Save')
+      foot.appendChild(hint)
+      foot.appendChild(cancelButton)
+      foot.appendChild(saveButton)
+
+      dialog.appendChild(head)
+      dialog.appendChild(textarea)
+      dialog.appendChild(foot)
+      overlay.appendChild(dialog)
+      document.body.appendChild(overlay)
+      editorOverlay = overlay
+
+      var dirty = false
+      var saving = false
+      var closed = false
+
+      function setDirty(value) {
+        dirty = value
+        if (value) dirtyDot.setAttribute('data-dirty', '')
+        else dirtyDot.removeAttribute('data-dirty')
+      }
+
+      function cleanup() {
+        if (closed) return
+        closed = true
+        document.removeEventListener('keydown', onKey, true)
+        overlay.remove()
+        if (editorOverlay === overlay) editorOverlay = null
+      }
+
+      function close() {
+        if (saving) return
+        if (dirty && !window.confirm(L('放弃未保存的修改？', 'Discard unsaved changes?'))) return
+        cleanup()
+      }
+
+      function save() {
+        if (saving || closed) return
+        saving = true
+        saveButton.disabled = true
+        saveButton.textContent = L('保存中…', 'Saving…')
+        sidebarCall(ctx, 'fs.write', { path: path, content: textarea.value }).then(function () {
+          saving = false
+          setDirty(false)
+          cleanup()
+          toast(L('已保存', 'Saved'))
+          reloadTextPreview()
+        }).catch(function (error) {
+          saving = false
+          saveButton.disabled = false
+          saveButton.textContent = L('保存', 'Save')
+          toast(String(error && error.message ? error.message : error))
+        })
+      }
+
+      function onKey(event) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          close()
+          return
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault()
+          save()
+        }
+      }
+
+      textarea.addEventListener('input', function () { setDirty(true) })
+      closeButton.addEventListener('click', close)
+      cancelButton.addEventListener('click', close)
+      saveButton.addEventListener('click', save)
+      overlay.addEventListener('mousedown', function (event) {
+        if (event.target === overlay) close()
+      })
+      document.addEventListener('keydown', onKey, true)
+      textarea.focus()
+      textarea.setSelectionRange(0, 0)
+    }
+
+    /** The document header action: edit the previewed file in place. */
+    function DocEditAction(props) {
+      var path = props && typeof props.absolutePath === 'string' ? props.absolutePath : ''
+      if (path === '') return null
+      return React.createElement('button', {
+        type: 'button',
+        className: 'nfo-doc-edit',
+        title: L('编辑', 'Edit'),
+        'aria-label': L('编辑', 'Edit'),
+        onClick: function () { if (currentCtx) openTextEditor(currentCtx, path) },
+      }, PencilGlyph())
+    }
+
+    exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
     exports.apply = function (ctx) {
       currentCtx = ctx
       try { locale = ctx.locale.getSnapshot().active || 'en' } catch (error) { locale = 'en' }
       try { ctx.locale.subscribe(function () { try { locale = ctx.locale.getSnapshot().active || locale } catch (error) { /* ignore */ } }) } catch (error) { /* ignore */ }
+      ctx.effect(function () {
+        return ctx.slots.inject('sidebar.right.tab.document.actions', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.tab.document.actions',
+            id: 'native-file-ops-edit',
+            order: 20,
+          }, DocEditAction)
+        })
+      }, 'dsh-native-file-ops: document edit action')
       var style = document.createElement('style')
       style.dataset.plugin = 'dsh-native-file-ops'
       style.textContent = CSS
