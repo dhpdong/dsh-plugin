@@ -131,7 +131,7 @@ export function TextEditor(props: FileViewerProps) {
     const state = EditorState.create({
       doc: content,
       extensions: [
-        CodeMirrorView.lineWrapping,
+        ...(props.lineWrapping === false ? [] : [CodeMirrorView.lineWrapping]),
         lineNumbers(),
         history(),
         EditorState.tabSize.of(2),

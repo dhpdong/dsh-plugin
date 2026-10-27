@@ -255,6 +255,8 @@ export interface FileViewerProps {
     autoSave?: boolean;
     /** Initial markdown/html mode; defaults to 'preview'. */
     initialMode?: 'preview' | 'edit';
+    /** Wrap long lines (default true); false leaves one visual line per source line and scrolls horizontally. */
+    lineWrapping?: boolean;
 }
 /** The toolbar state a text editor reports to the host's merged-mode header. */
 export interface EditorToolbarState {

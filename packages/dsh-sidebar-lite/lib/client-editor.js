@@ -47913,7 +47913,7 @@ globalThis.__dshChunks__["editor"] = (require) => {
 				state: EditorState.create({
 					doc: content,
 					extensions: [
-						EditorView.lineWrapping,
+						...(props.lineWrapping === false ? [] : [EditorView.lineWrapping]),
 						lineNumbers(),
 						history(),
 						EditorState.tabSize.of(2),

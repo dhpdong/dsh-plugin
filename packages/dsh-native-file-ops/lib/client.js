@@ -739,6 +739,7 @@ window.__ModuleLoader__.load({
           truncated: false,
           autoSave: true,
           initialMode: 'edit',
+          lineWrapping: false,
         }))
       }).catch(function () {
         cleanup()
