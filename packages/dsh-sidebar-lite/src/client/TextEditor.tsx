@@ -58,11 +58,14 @@ export const HTML_IFRAME_SANDBOX = 'allow-scripts allow-popups allow-downloads a
 
 export function TextEditor(props: FileViewerProps) {
   const { ctx, scope, path, viewerId, content, truncated } = props
-  const [mode, setMode] = useState<ViewMode>('preview')
+  const [mode, setMode] = useState<ViewMode>(props.initialMode === 'edit' ? 'edit' : 'preview')
   /** The editor's current text (null while clean); preview renders this. */
   const [draft, setDraft] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle')
+  /** Latest document text, for the auto-save idle timer and unmount flush. */
+  const liveRef = useRef(content ?? '')
+  const savedRef = useRef(content ?? '')
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<CodeMirrorView | null>(null)
   const savingRef = useRef(false)
@@ -138,7 +141,9 @@ export function TextEditor(props: FileViewerProps) {
         ...(language !== null ? [language] : []),
         CodeMirrorView.updateListener.of((update) => {
           if (update.docChanged) {
-            setDraft(update.state.doc.toString())
+            const text = update.state.doc.toString()
+            liveRef.current = text
+            setDraft(text)
             setDirty(true)
           }
         }),
@@ -230,8 +235,11 @@ export function TextEditor(props: FileViewerProps) {
     if (view === null || savingRef.current) return
     savingRef.current = true
     setSaveState('saving')
-    api.fsWrite(scope, path, view.state.doc.toString()).then(() => {
+    const text = view.state.doc.toString()
+    api.fsWrite(scope, path, text).then(() => {
       savingRef.current = false
+      savedRef.current = text
+      liveRef.current = text
       setDraft(null)
       setDirty(false)
       setSaveState('saved')
@@ -241,6 +249,24 @@ export function TextEditor(props: FileViewerProps) {
     })
   }
 
+  const saveRef = useRef(save)
+  saveRef.current = save
+  // Auto-save (the merged native editor pane): every idle pause after a
+  // change writes the draft, so switching files never needs a Save click.
+  useEffect(() => {
+    if (props.autoSave !== true || draft === null) return
+    const timer = window.setTimeout(() => { saveRef.current() }, 700)
+    return () => { window.clearTimeout(timer) }
+  }, [draft, props.autoSave])
+  // Last-chance flush when the pane unmounts mid-edit.
+  useEffect(() => {
+    if (props.autoSave !== true) return
+    return () => {
+      if (liveRef.current === savedRef.current) return
+      void api.fsWrite(scope, path, liveRef.current).catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const markdown = viewerId === 'markdown'
   const html = viewerId === 'html'
   /** The markdown source the preview renders (draft wins over saved content). */

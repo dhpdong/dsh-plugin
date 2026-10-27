@@ -58,6 +58,7 @@ window.__ModuleLoader__.load({
 .nfo-inplace-bar button{height:26px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:12px/1 system-ui,sans-serif;cursor:pointer}
 .nfo-inplace-bar button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
 .nfo-inplace-bar button:disabled{opacity:.5;cursor:default}
+.nfo-inplace-mount{display:flex;flex-direction:column;height:100%;min-height:0}
 .nfo-inplace-text{box-sizing:border-box;flex:1 1 auto;min-height:0;width:100%;padding:10px 14px;border:0;outline:none;resize:none;background:transparent;color:var(--dsw-alias-label-primary,#eee);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
 `
     var locale = 'en'
@@ -473,8 +474,8 @@ window.__ModuleLoader__.load({
       if (preview !== null) {
         var running = preview.querySelector('.nfo-inplace')
         if (running !== null) {
-          var area = running.querySelector('.nfo-inplace-text')
-          if (area !== null) area.focus()
+          var area = running.querySelector('.cm-content')
+          if (area !== null && typeof area.focus === 'function') area.focus()
           return
         }
       }
@@ -637,8 +638,54 @@ window.__ModuleLoader__.load({
      * compact save/cancel bar. Keeps the tab, path header and preview chrome
      * exactly where they are — only the scrollable body is covered.
      */
+    /** Cached lazy load of sidebar-lite's CodeMirror editor chunk. */
+    var editorChunkPromise = null
+    function loadEditorChunk() {
+      if (editorChunkPromise !== null) return editorChunkPromise
+      editorChunkPromise = new Promise(function (resolve, reject) {
+        var factory = globalThis.__dshChunks__ && globalThis.__dshChunks__.editor
+        function materialize() {
+          var fn = globalThis.__dshChunks__ && globalThis.__dshChunks__.editor
+          if (typeof fn !== 'function') { reject(new Error('editor chunk missing')); return }
+          try {
+            resolve(fn(function (spec) {
+              if (spec === 'react') return React
+              return require(spec)
+            }))
+          } catch (error) { reject(error) }
+        }
+        if (typeof factory === 'function') { materialize(); return }
+        var script = document.createElement('script')
+        script.src = '/sidebar/bundle/editor.js'
+        script.onload = materialize
+        script.onerror = function () { reject(new Error('editor chunk failed to load')) }
+        document.head.appendChild(script)
+      }).catch(function (error) {
+        editorChunkPromise = null
+        throw error
+      })
+      return editorChunkPromise
+    }
+
+    function editorViewerId(path) {
+      var lower = String(path).toLowerCase()
+      if (/\.(md|markdown|mdx)$/.test(lower)) return 'markdown'
+      if (/\.(html|htm)$/.test(lower)) return 'html'
+      return 'code'
+    }
+
+    /**
+     * The always-on editor pane: mounts sidebar-lite's CodeMirror TextEditor
+     * (syntax highlighting, markdown/html preview toggle, Ctrl+S) over the
+     * document body. autoSave writes every idle pause and initialMode 'edit'
+     * keeps the source editable from the first paint.
+     */
     function showInlineEditor(ctx, path, initial, preview) {
-      preview.removeAttribute('data-nfo-auto-pending')
+      var state = ctxState(ctx)
+      if (state === undefined) {
+        showTextEditor(ctx, path, initial)
+        return
+      }
       var existing = preview.querySelector('.nfo-inplace')
       if (existing !== null) {
         var previous = existing.__nfoCleanup
@@ -652,135 +699,51 @@ window.__ModuleLoader__.load({
 
       var box = document.createElement('div')
       box.className = 'nfo-inplace'
-
-      var bar = document.createElement('div')
-      bar.className = 'nfo-inplace-bar'
-      var dirtyDot = document.createElement('span')
-      dirtyDot.className = 'nfo-edit-dirty'
-      var status = document.createElement('span')
-      status.className = 'nfo-inplace-hint'
-      status.textContent = L('自动保存 · Ctrl+S 立即保存', 'Auto-save · Ctrl+S saves now')
-      bar.appendChild(dirtyDot)
-      bar.appendChild(status)
-
-      var textarea = document.createElement('textarea')
-      textarea.className = 'nfo-inplace-text'
-      textarea.spellcheck = false
-      textarea.wrap = 'off'
-      textarea.value = initial
-      textarea.setAttribute('aria-label', L('文件内容', 'File content'))
-
-      box.appendChild(bar)
-      box.appendChild(textarea)
+      var mount = document.createElement('div')
+      mount.className = 'nfo-inplace-mount'
+      box.appendChild(mount)
       preview.appendChild(box)
 
-      var savedValue = initial
-      var timer = null
-      var saving = false
+      var root = null
       var closed = false
-
-      function setDirty(value) {
-        if (value) dirtyDot.setAttribute('data-dirty', '')
-        else dirtyDot.removeAttribute('data-dirty')
-      }
-
-      function setStatus(text, dirty) {
-        status.textContent = text
-        setDirty(dirty)
-      }
-
-      function requestSave() {
-        if (saving || closed) return
-        if (textarea.value === savedValue) {
-          setStatus(L('已保存 · Ctrl+S 立即保存', 'Saved · Ctrl+S saves now'), false)
-          return
-        }
-        saving = true
-        setStatus(L('保存中…', 'Saving…'), true)
-        var value = textarea.value
-        sidebarCall(ctx, 'fs.write', { path: path, content: value }).then(function () {
-          saving = false
-          savedValue = value
-          setStatus(L('已保存 · Ctrl+S 立即保存', 'Saved · Ctrl+S saves now'), false)
-        }).catch(function (error) {
-          saving = false
-          setStatus(L('保存失败：', 'Save failed: ') + String(error && error.message ? error.message : error), true)
-        })
-      }
-
-      function scheduleSave() {
-        if (timer !== null) window.clearTimeout(timer)
-        timer = window.setTimeout(function () {
-          timer = null
-          requestSave()
-        }, 800)
-      }
-
-      function flushOnExit() {
-        if (closed || textarea.value === savedValue) return
-        var state = ctxState(ctx)
-        if (state === undefined) return
-        try {
-          fetch('/sidebar/api/fs.write', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            keepalive: true,
-            body: JSON.stringify({ sessionId: state.sessionId, cwd: state.cwd, path: path, content: textarea.value }),
-          }).catch(function () {})
-        } catch (error) { /* ignore */ }
-      }
+      var removal = new MutationObserver(function () {
+        if (!box.isConnected) cleanup()
+      })
 
       function cleanup() {
         if (closed) return
-        if (timer !== null) {
-          window.clearTimeout(timer)
-          timer = null
-        }
-        flushOnExit()
         closed = true
-        document.removeEventListener('keydown', onKey, true)
-        window.removeEventListener('pagehide', onPageHide)
         removal.disconnect()
+        if (root !== null) {
+          try { root.unmount() } catch (error) { /* already gone */ }
+          root = null
+        }
         box.remove()
         preview.style.position = wasPosition
         preview.style.overflow = wasOverflow
       }
       box.__nfoCleanup = cleanup
-
-      function onKey(event) {
-        if (!box.isConnected) { cleanup(); return }
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-          event.preventDefault()
-          if (timer !== null) {
-            window.clearTimeout(timer)
-            timer = null
-          }
-          requestSave()
-        }
-      }
-
-      function onPageHide() { flushOnExit() }
-
-      var removal = new MutationObserver(function () {
-        if (!box.isConnected) cleanup()
-      })
-
-      textarea.addEventListener('input', function () {
-        setStatus(L('未保存 · 自动保存中…', 'Unsaved · auto-saving…'), true)
-        scheduleSave()
-      })
-      textarea.addEventListener('blur', function () {
-        if (timer !== null) {
-          window.clearTimeout(timer)
-          timer = null
-        }
-        requestSave()
-      })
       removal.observe(preview, { childList: true })
-      document.addEventListener('keydown', onKey, true)
-      window.addEventListener('pagehide', onPageHide)
-      textarea.focus()
-      textarea.setSelectionRange(0, 0)
+
+      loadEditorChunk().then(function (chunk) {
+        if (closed) return
+        var ReactDOMClient = require('react-dom/client')
+        root = ReactDOMClient.createRoot(mount)
+        root.render(React.createElement(chunk.TextEditor, {
+          ctx: ctx,
+          scope: { sessionId: state.sessionId, cwd: state.cwd },
+          path: path,
+          title: path,
+          viewerId: editorViewerId(path),
+          content: initial,
+          truncated: false,
+          autoSave: true,
+          initialMode: 'edit',
+        }))
+      }).catch(function () {
+        cleanup()
+        showTextEditor(ctx, path, initial)
+      })
     }
 
     /** The document header action: edit the previewed file in place. */
