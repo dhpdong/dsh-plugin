@@ -25,6 +25,10 @@ export interface SidebarPty {
     /** Whether the top-level process exited (transcript stays replayable). */
     exited: boolean;
     exitCode?: number | null;
+    /** How many WebSocket views are attached right now. One pty can serve
+     *  several views (a terminal shared by position across conversations), so
+     *  closing one view must not kill the shell while another still shows it. */
+    views: number;
 }
 /**
  * The terminal registry. `maxPerSession` bounds concurrent processes per

@@ -1658,7 +1658,8 @@ var PtyManager = class {
 				env: { ...process.env }
 			}),
 			transcript: "",
-			exited: false
+			exited: false,
+			views: 0
 		};
 		handle.pty.onData((data) => {
 			handle.transcript += data;
@@ -4833,6 +4834,7 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 		const cwd = resolved.allowOutsideWorkspace && terminalClientCwd !== void 0 && isAbsolute(terminalClientCwd) ? terminalClientCwd : sessionCwdOf(ctx, sessionId, terminalClientCwd);
 		const overrides = shellOverridesOf(getSettings);
 		const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs);
+		handle.views += 1;
 		if (handle.transcript !== "") ws.send(handle.transcript);
 		const onData = (data) => {
 			if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 4194304) ws.send(data);
@@ -4850,7 +4852,7 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 				if (parsed !== null && typeof parsed === "object") control = parsed;
 			} catch {}
 			if (control !== null && control.type === "close") {
-				ptyManager.scheduleClose(handle.key, 0);
+				if (handle.views <= 1) ptyManager.scheduleClose(handle.key, 0);
 				return;
 			}
 			if (control !== null && control.type === "park") {
@@ -4866,6 +4868,7 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 		ws.on("close", () => {
 			dataSub.dispose();
 			exitSub.dispose();
+			handle.views = Math.max(0, handle.views - 1);
 			if (!ptyManager.isParked(handle.key)) ptyManager.scheduleClose(handle.key, resolved.reconnectGraceMs);
 		});
 	} catch (error) {

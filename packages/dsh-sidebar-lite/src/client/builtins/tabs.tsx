@@ -71,7 +71,11 @@ function terminalUuid(): string {
 
 /** Count UI-owned terminals (agent:` tabs excluded — they are the model's). */
 function uiTerminalCount(state: SidebarState): number {
+  // Terminals live in the BOTTOM panel in this fork (the right panel is
+  // disabled), so the count must cover both trees — otherwise the quota never
+  // engages and every new terminal reuses the first ordinal ("bash" × N).
   return allLeaves(state.splits)
+    .concat(allLeaves(state.bottomSplits))
     .flatMap(leaf => leaf.tabs)
     .filter(tab => tab.type === 'terminal' && !isAgentTabId(tab.id)).length
 }
@@ -271,11 +275,15 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
       createTab: (state) => {
         const count = uiTerminalCount(state)
         if (count >= TERMINAL_LIMIT) return null
+        // The first terminal keeps the bare shell name ("bash"); later ones
+        // get an ordinal so the strip never shows two identical chips.
+        // Renaming is available from the tab's context menu.
+        const base = options.terminalTitle?.() ?? t('terminal')
         return {
           tab: {
             id: `terminal:${terminalUuid()}`,
             type: 'terminal',
-            title: options.terminalTitle?.() ?? t('terminal'),
+            title: count === 0 ? base : `${base} ${count + 1}`,
           },
           // Keep the legacy counter advancing for compatibility with older
           // persisted states; new ids no longer use it.

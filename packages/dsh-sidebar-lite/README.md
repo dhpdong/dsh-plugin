@@ -97,6 +97,11 @@ cd /path/to/dsh-plugin && dsh web --no-open
 
 `lib/` 已随仓库分发，无需构建；修改源码后 `cd packages/dsh-sidebar-lite && pnpm install && pnpm build`，再把 `lib/` 同步到 profile 的安装副本。文件树的右键/拖拽操作需要同时安装 `dsh-native-file-ops`。
 
+**终端页签（本 fork 的表现）**：右侧面板关闭时，底部面板的 `+` 直接新建终端（不再弹出
+explorer/git/子代理/侧边对话/浏览器 的菜单）；终端标题按序号区分（`bash`、`bash 2`…），
+右键页签有 **重命名**；同一位置的终端在所有工作区之间共享（切工作区挂回同一个 shell），
+关闭其中一个不会让别的页签发「process exited」。
+
 **全局文件浏览器开关**：`dsh-native-file-ops` 把原生 Files 页签接管成「任意根目录」的浏览器，需要宿主的 `/sidebar/api/fs.*` 接受工作区之外的绝对路径：
 
 ```yaml

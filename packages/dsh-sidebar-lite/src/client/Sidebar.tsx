@@ -178,6 +178,11 @@ function buildNewTabOptions(state: SidebarState, ctx: Context, scope: SessionSco
   const service = ctx.get('betterSidebar')
   if (service === undefined) return []
   return service.getTabs()
+    // This fork keeps the right panel disabled: the bottom panel only hosts
+    // terminals, so the workbench-only types (explorer/git/subagent/sidechat/
+    // browser/diff) would just clutter the + menu. With terminal as the only
+    // option, the + button creates it directly (see TabBar).
+    .filter(d => RIGHT_PANEL_ENABLED || d.id === 'terminal')
     .filter(d => !d.hidden && service.isTabEnabled(d.id))
     .sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
     .map(d => ({
@@ -1256,6 +1261,11 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
 
 
   const actions: WorkbenchActions = useMemo(() => ({
+    renameTab: (tabId, title) => {
+      // Retitle through the service so the change is recorded in the tab
+      // state (and therefore persisted per session like any other edit).
+      ctx.get('betterSidebar')?.updateTab(tabId, { title })
+    },
     closeTab: (paneId, tabId) => {
       // A closed terminal releases its pty immediately — including when its
       // socket is mid-reconnect, where the unmount close frame never reaches

@@ -1498,6 +1498,51 @@ window.__ModuleLoader__.load({
       try { window.localStorage.setItem(TERM_CWD_KEY, path) } catch (error) { /* ignore */ }
     }
 
+    /** UI-owned terminal tab ids of the on-screen session, in pane order. */
+    function terminalTabIds() {
+      var ids = []
+      var service = currentCtx && typeof currentCtx.get === 'function' ? currentCtx.get('betterSidebar') : undefined
+      if (!service || typeof service.getSnapshot !== 'function') return ids
+      var snapshot = service.getSnapshot()
+      var state = snapshot && snapshot.state
+      if (!state) return ids
+      var tabs = []
+      function walk(node) {
+        if (!node || typeof node !== 'object') return
+        if (node.kind === 'leaf' && Array.isArray(node.tabs)) {
+          for (var i = 0; i < node.tabs.length; i += 1) tabs.push(node.tabs[i])
+          return
+        }
+        if (Array.isArray(node.children)) {
+          for (var j = 0; j < node.children.length; j += 1) walk(node.children[j])
+        }
+      }
+      walk(state.splits)
+      walk(state.bottomSplits)
+      if (Array.isArray(state.floats)) {
+        for (var f = 0; f < state.floats.length; f += 1) {
+          if (state.floats[f] && state.floats[f].tab) tabs.push(state.floats[f].tab)
+        }
+      }
+      for (var k = 0; k < tabs.length; k += 1) {
+        var tab = tabs[k]
+        if (tab && tab.type === 'terminal' && String(tab.id).indexOf('agent:') !== 0) ids.push(tab.id)
+      }
+      return ids
+    }
+
+    /**
+     * Which shared shell a terminal tab belongs to. Terminals are shared by
+     * POSITION, not all at once: the n-th terminal of every session is the
+     * same shell, so opening a second terminal gives a separate shell while
+     * switching workspace still lands on the one you were using.
+     */
+    function sharedTerminalSlot(tabId) {
+      var ids = terminalTabIds()
+      var index = ids.indexOf(tabId)
+      return index >= 0 ? index + 1 : 1
+    }
+
     /**
      * The cwd of the shared shell. It must be STABLE across workspace switches
      * (the host respawns a terminal whose cwd changed), so an explicitly picked
@@ -1525,11 +1570,13 @@ window.__ModuleLoader__.load({
           var cwd = sharedTerminalCwd()
           if (cwd !== undefined && typeof url === 'string' && url.indexOf('/sidebar/ws/terminal') !== -1 && url.indexOf('uuid=') === -1) {
             var parsed = new URL(url, window.location.href)
+            var requestedTab = parsed.searchParams.get('tab') || ''
             parsed.searchParams.set('cwd', cwd)
-            // Same pty for every workspace: switching conversations reattaches
-            // instead of respawning (the host keys a terminal by these two).
+            // Same pty for every workspace at the same position: switching
+            // conversations reattaches instead of respawning (the host keys a
+            // terminal by session + tab, so both are replaced here).
             parsed.searchParams.set('sessionId', SHARED_TERM_SESSION)
-            parsed.searchParams.set('tab', SHARED_TERM_TAB)
+            parsed.searchParams.set('tab', SHARED_TERM_TAB + '-' + sharedTerminalSlot(requestedTab))
             next = parsed.toString()
           }
         } catch (error) { /* keep the original url */ }

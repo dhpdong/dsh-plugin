@@ -1370,6 +1370,7 @@ async function attachTerminal(
     // terminals opened from now on (existing pty handles keep their shell).
     const overrides = shellOverridesOf(getSettings)
     const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs)
+    handle.views += 1
     // Replay the transcript, then follow live output.
     if (handle.transcript !== '') ws.send(handle.transcript)
     const onData = (data: string): void => {
@@ -1396,8 +1397,11 @@ async function attachTerminal(
         // Not JSON: terminal input.
       }
       if (control !== null && control.type === 'close') {
-        // The owning tab was closed: release the quota immediately.
-        ptyManager.scheduleClose(handle.key, 0)
+        // The owning tab was closed. A pty may be shared by several views
+        // (the same terminal position across conversations), so only the LAST
+        // view's close releases the process — otherwise closing one tab made
+        // every other tab on that shell print the exit banner.
+        if (handle.views <= 1) ptyManager.scheduleClose(handle.key, 0)
         return
       }
       if (control !== null && control.type === 'park') {
@@ -1425,6 +1429,7 @@ async function attachTerminal(
     ws.on('close', () => {
       dataSub.dispose()
       exitSub.dispose()
+      handle.views = Math.max(0, handle.views - 1)
       // A parked pty (the user switched conversations and sent `{type:'park'}`)
       // stays alive indefinitely — do NOT start the grace countdown. A bare
       // socket drop without a prior park (refresh, crash) starts the grace

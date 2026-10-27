@@ -15,6 +15,8 @@ export interface WorkbenchActions {
     resizeSplit: (splitId: string, index: number, deltaFrac: number) => void;
     /** Float a docked tab out as a free window (tab context menu entry). */
     floatTab: (tabId: string) => void;
+    /** Retitle one tab (tab context menu entry). */
+    renameTab: (tabId: string, title: string) => void;
 }
 /** The workbench: the split tree filling the sidebar body. `tree` selects
  *  which tree renders (the right panel's by default; the bottom panel passes
