@@ -239,9 +239,13 @@ export function TextEditor(props: FileViewerProps) {
     api.fsWrite(scope, path, text).then(() => {
       savingRef.current = false
       savedRef.current = text
-      liveRef.current = text
-      setDraft(null)
-      setDirty(false)
+      // Only retire the dirty state when no newer keystroke arrived while
+      // the write was in flight; otherwise keep the draft (and its dot) so
+      // the next idle tick saves the newer text.
+      if (liveRef.current === text) {
+        setDraft(null)
+        setDirty(false)
+      }
       setSaveState('saved')
     }).catch(() => {
       savingRef.current = false
