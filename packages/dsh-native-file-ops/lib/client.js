@@ -1477,6 +1477,13 @@ window.__ModuleLoader__.load({
      * carries the browser root instead of the session cwd, so switching
      * workspace no longer changes where a new shell starts.
      */
+    // A terminal pinned to the shared root must survive a workspace switch, so
+    // every session's sidebar terminal is addressed to ONE pty key: the host
+    // reuses the live handle (and replays its transcript) instead of spawning
+    // a fresh shell per session.
+    var SHARED_TERM_SESSION = '__nfo_shared_terminal__'
+    var SHARED_TERM_TAB = 'shared'
+
     function installTerminalCwd() {
       var Native = window.WebSocket
       if (typeof Native !== 'function' || Native.__nfoCwd === true) return
@@ -1487,6 +1494,10 @@ window.__ModuleLoader__.load({
           if (root !== undefined && typeof url === 'string' && url.indexOf('/sidebar/ws/terminal') !== -1 && url.indexOf('uuid=') === -1) {
             var parsed = new URL(url, window.location.href)
             parsed.searchParams.set('cwd', root)
+            // Same pty for every workspace: switching conversations reattaches
+            // instead of respawning (the host keys a terminal by these two).
+            parsed.searchParams.set('sessionId', SHARED_TERM_SESSION)
+            parsed.searchParams.set('tab', SHARED_TERM_TAB)
             next = parsed.toString()
           }
         } catch (error) { /* keep the original url */ }
