@@ -2,112 +2,66 @@
 
 English | [中文](README.zh-CN.md)
 
-Enhanced DSH Web workspace directory picker UI.
+Enhanced workspace directory picker UI for DSH Web (DSH **0.2.1-rc.2**).
 
-This plugin replaces the stock browse directory-picker surface inserted by `dsh-mobile` and adds two navigation helpers to the "Add workspace" dialog:
+The stock browse dialog lists folders but offers no explicit way back to the
+parent and no Windows drive switch. This plugin replaces that browse surface
+and adds:
 
-- **Up** button: navigate to the parent directory from the current listing.
-- **Windows drive selector**: automatically probes accessible roots from `A:\` through `Z:\` with the existing `listDirectory(root, signal)` API, then lets the user jump directly to another drive.
+- **Up** button: navigate to the parent directory of the current listing.
+- **Windows drive selector**: probes `A:\` … `Z:\` with the existing
+  `listDirectory(root, signal)` API and lists only the drives that answer.
 
-Behavior details:
+It follows the active DSH language (built-in zh / en dictionaries), hides the
+Up button at a filesystem root, and leaves the host-side directory picker
+untouched.
 
-- The picker follows the active DSH language (built-in zh / en dictionaries, switches live).
-- The Up button is hidden at a filesystem root (a drive root has no parent to list).
-- The drive dropdown lists only the roots that answered the probe — unavailable drive letters stay out of the menu.
+## How it mounts on DSH 0.2
 
-This plugin is **not published to npm**; install it from a local path as shown below.
-
-## Why this is a UI surface plugin
-
-DSH already has a host-side `directoryPicker` service. Registering another service with the same name causes a Cordis duplicate-service error, so this plugin does **not** register a new host directory picker.
-
-Instead, it replaces only the client-side UI surface:
-
-1. Keep the official host browse picker from `dsh-mobile`:
-   - `directory-picker-mobile-host`
-   - `@deepseek-ai/dsh-host-directory-picker-browse`
-2. Disable the official browse UI surface inserted by `dsh-mobile`:
-   - `directory-picker-mobile-surface`
-   - `@deepseek-ai/dsh-client-ui-directory-picker-browse`
-3. Insert this enhanced UI surface:
-   - `directory-picker-enhanced-surface`
-   - `dsh-directory-picker-enhanced`
-
-The official DSH installation files remain unmodified.
-
-## Package layout
-
-```text
-dsh-directory-picker-enhanced/
-├─ package.json
-├─ cordis.patch.yml
-├─ README.md
-├─ README.zh-CN.md
-└─ lib/
-   ├─ index.js
-   └─ client.js
-```
-
-## Installation in a DSH Web profile
-
-This plugin is intended to be loaded after `dsh-mobile`, because its patch disables the browse UI surface that `dsh-mobile` inserts.
-
-Example profile dependency in `C:\Users\dhpdo\.dsh\profiles\web\package.json`:
-
-```json
-"dsh-directory-picker-enhanced": "file:K:/work/project/dsh/dsh-directory-picker-enhanced"
-```
-
-Example bundle order:
-
-```json
-"bundles": [
-  "@deepseek-ai/dsh-base",
-  "@deepseek-ai/dsh-web-app",
-  "dsh-mobile",
-  "dsh-directory-picker-enhanced"
-]
-```
-
-If the profile does not automatically install `file:` dependencies, copy this folder to:
-
-```text
-C:\Users\dhpdo\.dsh\profiles\web\node_modules\dsh-directory-picker-enhanced
-```
-
-## Verification
-
-From any shell:
-
-```bash
-node --check "K:/work/project/dsh/dsh-directory-picker-enhanced/lib/client.js"
-node --check "K:/work/project/dsh/dsh-directory-picker-enhanced/lib/index.js"
-dsh --profile web --dump-config
-```
-
-The dumped config should include:
+DSH 0.2 resolves the picker pair at boot: the `directory-picker-auto` row
+mounts either the native or the browse host backend together with its matching
+client surface. Replacing only the UI therefore means pinning that pair:
 
 ```yaml
-# == dsh-mobile, patched by dsh-directory-picker-enhanced
-- id: directory-picker-mobile-surface
-  name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
   disabled: true
 
-# == dsh-directory-picker-enhanced
-- id: directory-picker-enhanced-surface
-  name: dsh-directory-picker-enhanced
+- insert:
+    - id: directory-picker-browse-host
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: directory-picker-enhanced-surface
+      name: 'dsh-directory-picker-enhanced'
 ```
 
-Then restart DSH Web:
+This ships as the package's `cordis.patch.yml`; installing the bundle applies
+it automatically. The official browse client surface is never inserted, so the
+single-occupant `conversation.hero.workspace.directoryFlow` and
+`sidebar.workspaces.directoryFlow` holes have exactly one registrant.
 
-```bash
-dsh web --no-open
+## Install
+
+```jsonc
+// ~/.dsh/profiles/web/package.json
+{
+  "dependencies": {
+    "dsh-directory-picker-enhanced": "file:<repo>/packages/dsh-directory-picker-enhanced"
+  },
+  "dsh": { "profile": { "bundles": [/* … */, "dsh-directory-picker-enhanced"] } }
+}
 ```
 
-Open `http://127.0.0.1:3080/`, then use **Add workspace**. The directory dialog should show the **Drive** selector and **Up** button.
+Then `pnpm install` in the profile (or copy the package into
+`node_modules/`), restart `dsh web`, and hard-refresh the browser.
+
+## Verify
+
+`dsh --profile web --dump-config` must show the disabled `directory-picker`
+row, the `directory-picker-browse-host` row, and the
+`directory-picker-enhanced-surface` row. Open **Add workspace** and check for
+the **Up** button and the **Drive** selector on Windows.
 
 ## Rollback
 
-Remove `dsh-directory-picker-enhanced` from the Web profile `dependencies` and `bundles`, then remove the installed copy from the profile `node_modules` directory if present.
-
-Because this plugin does not patch official DSH files, rollback does not require restoring files under the global DSH installation.
+Remove the package from the profile's `dependencies` and `bundles`; the stock
+`directory-picker-auto` row returns on the next boot.

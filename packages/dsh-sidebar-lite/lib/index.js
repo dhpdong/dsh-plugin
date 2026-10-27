@@ -1,16 +1,15 @@
 import { createRequire } from "node:module";
+import { chmodSync, createReadStream, createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, opendir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import z from "schemastery";
-import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import trash from "trash";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
-import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings";
-import { homedir, userInfo } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { snapshotSubagentDescriptor } from "@deepseek-ai/dsh-subagent";
@@ -71,6 +70,7 @@ const Config = z.object({
 	listLimit: z.number().step(1).min(1).default(1e3),
 	terminalsPerSession: z.number().step(1).min(1).default(3),
 	reconnectGraceMs: z.number().step(1).min(0).default(3e4),
+	allowOutsideWorkspace: z.boolean().default(false),
 	shell: z.string().default(""),
 	shellArgs: z.array(z.string()).default([])
 });
@@ -88,6 +88,7 @@ function resolveSidebarConfig(config) {
 		listLimit: config?.listLimit ?? 1e3,
 		terminalsPerSession: config?.terminalsPerSession ?? 3,
 		reconnectGraceMs: config?.reconnectGraceMs ?? 3e4,
+		allowOutsideWorkspace: config?.allowOutsideWorkspace ?? false,
 		shell: config?.shell?.trim() ?? "",
 		shellArgs: config?.shellArgs ?? []
 	};
@@ -324,6 +325,23 @@ function messageOf(error) {
 //#endregion
 //#region src/path-security.ts
 /** Filesystem path guards shared by sidebar APIs that access a session workspace. */
+/**
+* When true the workspace fence is lifted: every fs route accepts absolute
+* paths outside the session workspace, so the file panel can browse an
+* arbitrary directory (the "global file browser" mode backed by
+* `dsh-native-file-ops`). Set once by the host half from
+* `config.allowOutsideWorkspace`; defaults to false, which keeps every route
+* workspace-confined exactly as before.
+*/
+let outsideWorkspaceAllowed = false;
+/** Turn the workspace fence on or off (host bootstrap reads the config). */
+function setOutsideWorkspaceAllowed(value) {
+	outsideWorkspaceAllowed = value;
+}
+/** Whether absolute paths outside the session workspace are accepted. */
+function isOutsideWorkspaceAllowed() {
+	return outsideWorkspaceAllowed;
+}
 /** Resolve a path and convert filesystem resolution failures to an API error. */
 async function resolveRealPath(path, label) {
 	try {
@@ -345,6 +363,7 @@ function assertWithinWorkspace(workspace, target) {
 */
 async function ensureWorkspacePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (outsideWorkspaceAllowed) return resolveRealPath(absolute, "target");
 	const [realCwd, realTarget] = await Promise.all([resolveRealPath(cwd, "workspace"), resolveRealPath(absolute, "target")]);
 	assertWithinWorkspace(realCwd, realTarget);
 	return realTarget;
@@ -362,6 +381,7 @@ async function ensureWorkspacePath(cwd, target) {
 */
 async function ensureWorkspaceWritePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (outsideWorkspaceAllowed) return absolute;
 	const realCwd = await resolveRealPath(cwd, "workspace");
 	let existingPath = absolute;
 	const missingSegments = [];
@@ -436,6 +456,22 @@ async function createWorkspaceEntry(cwd, dir, name, kind) {
 */
 async function trashWorkspacePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (isOutsideWorkspaceAllowed()) {
+		const realParent = await realpath(dirname(absolute)).catch((error) => {
+			throw new SidebarError("fs-error", `cannot resolve target parent "${dirname(absolute)}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		});
+		const safeTarget = join(realParent, basename(absolute));
+		if (dirname(safeTarget) === safeTarget || safeTarget === requireAbsolute(cwd)) throw new SidebarError("forbidden", "refusing to trash a filesystem root", 403);
+		await lstat(safeTarget).catch((error) => {
+			throw new SidebarError("fs-error", `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		});
+		try {
+			await trash(safeTarget, { glob: false });
+		} catch (error) {
+			throw new SidebarError("fs-error", `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		}
+		return { path: safeTarget };
+	}
 	const root = requireAbsolute(cwd);
 	if (isWithin(root, absolute) && isWithin(absolute, root)) throw new SidebarError("forbidden", "refusing to trash the workspace root", 403);
 	const realCwd = await realpath(cwd).catch((error) => {
@@ -1622,7 +1658,8 @@ var PtyManager = class {
 				env: { ...process.env }
 			}),
 			transcript: "",
-			exited: false
+			exited: false,
+			views: 0
 		};
 		handle.pty.onData((data) => {
 			handle.transcript += data;
@@ -3086,7 +3123,9 @@ function buildJobsApi(ctx, outputLimit) {
 			const sessionId = requireString(payload, "sessionId");
 			const id = requireString(payload, "id");
 			const bySeq = /* @__PURE__ */ new Map();
-			for (const event of ctx.sessions.get(sessionId)?.events ?? []) {
+			const liveSession = ctx.sessions.get(sessionId);
+			const liveEvents = liveSession?.snapshotEvents?.() ?? liveSession?.events ?? [];
+			for (const event of liveEvents) {
 				const trace = traceOf(event);
 				if (trace !== void 0) bySeq.set(trace.seq, trace);
 			}
@@ -3481,7 +3520,10 @@ function buildSubagentLiveApi(ctx) {
 			if (entry.kind !== "child" || entry.activity !== "running") continue;
 			if (entry.label?.startsWith("Side: ") ?? false) continue;
 			try {
-				const activity = lastActivity(ctx.sessions.get(entry.id)?.events ?? [], 12);
+				const activity = lastActivity((() => {
+					const child = ctx.sessions.get(entry.id);
+					return child?.snapshotEvents?.() ?? child?.events ?? [];
+				})(), 12);
 				if (activity.text !== void 0 || activity.tool !== void 0) live[entry.id] = activity;
 			} catch {}
 		}
@@ -3536,12 +3578,33 @@ async function composeChildSetup(ctx, presetId) {
 		}
 	};
 }
+/**
+* Read a persisted session's header + complete log through the 0.2 handle
+* API (`open`/`read`/`close`). The old detached `inspect` method was removed
+* when persistence moved to per-session handles.
+* @param ctx - host context carrying the optional persistence service.
+* @param sessionId - persisted session id.
+* @returns the header and event log, or undefined when unavailable.
+*/
+async function readPersistedSession(ctx, sessionId) {
+	const persistence = ctx.get("sessionPersistence");
+	if (persistence === void 0) return void 0;
+	const handle = await persistence.open(sessionId, "read");
+	try {
+		const { events } = await handle.read();
+		return {
+			meta: handle.header,
+			events
+		};
+	} finally {
+		await handle.close();
+	}
+}
 /** Build the cold-resume setup from the thread's PERSISTED record (the
 *  recorded preset wins, newest selection event first). */
 async function composePersistedSetup(ctx, childId) {
-	const persistence = ctx.get("sessionPersistence");
-	if (persistence === void 0) return () => Promise.resolve();
-	const inspected = await persistence.inspect(childId);
+	const inspected = await readPersistedSession(ctx, childId);
+	if (inspected === void 0) return () => Promise.resolve();
 	const presetId = resolvePresetId(inspected.meta, inspected.events);
 	const presets = ctx.get("agentPresets");
 	if (presets === void 0 || presetId === void 0) return () => Promise.resolve();
@@ -3603,8 +3666,8 @@ function buildSidechatApi(ctx) {
 			const parent = liveThreadAgent(ctx, sessionId);
 			if (parent === void 0) throw new SidebarError("sidechat-error", `parent session "${sessionId}" is not running`, 409);
 			const parentSession = parent.session;
-			const inheritance = buildSidechatInheritance(parentSession.events);
-			const { agentPreset, setup } = await composeChildSetup(ctx, resolvePresetId(parentSession.header, parentSession.events));
+			const inheritance = buildSidechatInheritance(parentSession.snapshotEvents());
+			const { agentPreset, setup } = await composeChildSetup(ctx, resolvePresetId(parentSession.header, parentSession.snapshotEvents()));
 			const childId = `session-${randomUUID()}`;
 			const label = question === "" ? SIDE_NEW_THREAD_TITLE : sideLabel(question);
 			const descriptor = snapshotSubagentDescriptor({
@@ -3626,11 +3689,12 @@ function buildSidechatApi(ctx) {
 				meta: {
 					...parentSession.header.cwd === void 0 ? {} : { cwd: parentSession.header.cwd },
 					parentSession: parentSession.id,
-					seedLength: seed.length,
+					isSeeded: true,
 					origin: "subagent",
 					delegationDepth: (parentSession.header.delegationDepth ?? 0) + 1,
 					...agentPreset === void 0 ? {} : { agentPreset }
 				},
+				inheritedEventCount: inheritance.seed.length,
 				seed,
 				agentOptions: { ...parent.options },
 				setup,
@@ -3683,7 +3747,7 @@ function buildSidechatApi(ctx) {
 					throw new SidebarError("sidechat-error", `thread resume failed: ${error instanceof Error ? error.message : String(error)}`, 500);
 				}
 			}
-			if (boundaryDelivered(agent.session.events)) admitFollowup(agent, textPrompt(text));
+			if (boundaryDelivered(agent.session.snapshotEvents())) admitFollowup(agent, textPrompt(text));
 			else {
 				const parts = [SIDE_BOUNDARY_PROMPT];
 				const snapshot = pendingSnapshots.get(childId);
@@ -3727,9 +3791,9 @@ function buildSidechatApi(ctx) {
 					...preset === void 0 ? {} : { preset }
 				};
 			}
-			const persistence = ctx.get("sessionPersistence");
-			if (persistence !== void 0) try {
-				const inspected = await persistence.inspect(childId);
+			try {
+				const inspected = await readPersistedSession(ctx, childId);
+				if (inspected === void 0) return { live: false };
 				const preset = resolvePresetId(inspected.meta, inspected.events);
 				return {
 					live: false,
@@ -3763,7 +3827,7 @@ const name = "dsh-sidebar-lite";
 const inject = [
 	"webServer",
 	"sessions",
-	"webRuntime",
+	"webStartup",
 	"tools"
 ];
 /** Content types for the media route, by extension. */
@@ -3856,6 +3920,90 @@ async function readText(path, readLimit) {
 		await handle.close();
 	}
 }
+/** Refusal to overwrite side-card preferences changed since the form read them. */
+var SidebarPrefsConflictError = class extends Error {
+	/** Stable machine code the route maps back to `settings-conflict`. */
+	code = "SETTINGS_CONFLICT";
+	/**
+	* @param message - human-readable conflict detail.
+	*/
+	constructor(message) {
+		super(message);
+		this.name = "SidebarPrefsConflictError";
+	}
+};
+/**
+* Build the file-backed side-card preference store. DSH 0.2 replaced the
+* user-settings namespace registry with configuration forms, so a plugin's
+* own preferences are its own document: one small JSON file under the DSH
+* home, validated by {@link PrefsSchema} and revisioned exactly like the old
+* settings seam so a stale editor is refused instead of silently winning.
+* @param path - absolute path of the preference document.
+* @param onError - optional warning sink for unreadable/unwritable files.
+* @returns the store.
+*/
+function createPrefsStore(path, onError) {
+	let prefs = { ...SIDEBAR_PREFS_DEFAULTS };
+	let revision = 0;
+	let loaded = false;
+	let loading;
+	const listeners = /* @__PURE__ */ new Set();
+	const notify = (next, prev) => {
+		for (const listener of [...listeners]) try {
+			listener(next, prev);
+		} catch (error) {
+			onError?.(`prefs listener failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	const store = {
+		load: () => {
+			if (loaded) return Promise.resolve();
+			loading ??= (async () => {
+				try {
+					const raw = JSON.parse(await readFile(path, "utf8"));
+					const next = PrefsSchema(raw);
+					const prev = prefs;
+					prefs = next;
+					notify(next, prev);
+				} catch (error) {
+					if (error.code !== "ENOENT") onError?.(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+				} finally {
+					loaded = true;
+				}
+			})();
+			return loading;
+		},
+		get: () => prefs,
+		view: () => ({
+			value: prefs,
+			revision
+		}),
+		update: async (patch, expectedRevision) => {
+			await store.load();
+			if (expectedRevision !== void 0 && expectedRevision !== revision) throw new SidebarPrefsConflictError(`settings "${SIDEBAR_PREFS_NS}" changed since it was read (expected revision ${expectedRevision}, now ${revision})`);
+			const next = PrefsSchema({
+				...prefs,
+				...patch
+			});
+			await mkdir(dirname(path), { recursive: true });
+			const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+			await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+			await rename(temp, path);
+			const prev = prefs;
+			prefs = next;
+			revision += 1;
+			notify(next, prev);
+			return store.view();
+		},
+		watch: (callback) => {
+			listeners.add(callback);
+			return () => {
+				listeners.delete(callback);
+			};
+		}
+	};
+	return store;
+}
 /** Build the API method table bound to the plugin context, pty manager, agent pty registry, resolved config, and effective terminal shell. */
 /**
 * Resolve the settings-page terminal shell overrides (the terminal card's
@@ -3864,6 +4012,20 @@ async function readText(path, readLimit) {
 * runtime complement to the boot-time yaml — same contract, later binding:
 * the values here win for terminals opened afterwards.
 */
+/** The DSH home: `$DSH_HOME` or `~/.dsh` (same precedence as dsh-home-paths). */
+function dshHome() {
+	const configured = process.env.DSH_HOME;
+	return configured !== void 0 && configured.trim() !== "" ? configured.trim() : join(homedir(), ".dsh");
+}
+/** The deployment's accepted non-loopback authorities: explicit
+* `--trusted-host` values plus the listener's own bind address (0.2 moved
+* the bind-derived trust list from `webRuntime` onto `webStartup` + the
+* webServer bind facts). */
+function trustedHostsOf(ctx) {
+	const explicit = ctx.webStartup?.trustedHosts ?? [];
+	const bindHost = ctx.webServer?.host;
+	return bindHost === void 0 || bindHost === "" ? explicit : [...explicit, bindHost];
+}
 function shellOverridesOf(getSettings) {
 	const value = getSettings()?.get().value;
 	if (value === null || typeof value !== "object") return {};
@@ -3974,6 +4136,58 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 			await trashWorkspacePath(cwd, requireString(payload, "path"));
 			return { ok: true };
 		},
+		"fs.rename": async (payload) => {
+			const { cwd } = cwdOf(payload);
+			const source = await ensureWorkspacePath(cwd, requireString(payload, "path"));
+			const name = requireString(payload, "newName");
+			if (name === "" || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) throw new SidebarError("bad-request", "invalid name", 400);
+			if (name === basename(source)) return { path: source };
+			const target = await ensureWorkspaceWritePath(cwd, join(dirname(source), name));
+			await rename(source, target).catch((error) => {
+				throw new SidebarError("fs-error", `cannot rename "${source}": ${error instanceof Error ? error.message : String(error)}`, 400);
+			});
+			return { path: target };
+		},
+		"fs.manifest": async (payload) => {
+			const { cwd } = cwdOf(payload);
+			const root = await ensureWorkspacePath(cwd, requireString(payload, "path"));
+			const entries = [];
+			const walk = async (dir) => {
+				for (const item of await readdir(dir, { withFileTypes: true })) {
+					if (entries.length >= 5e4) return;
+					const absolute = join(dir, item.name);
+					const rel = relative(root, absolute).split(sep).join("/");
+					if (item.isSymbolicLink()) continue;
+					if (item.isDirectory()) {
+						entries.push({
+							path: rel,
+							type: "directory"
+						});
+						await walk(absolute);
+					} else if (item.isFile()) entries.push({
+						path: rel,
+						type: "file"
+					});
+				}
+			};
+			await walk(root);
+			return {
+				name: basename(root),
+				entries
+			};
+		},
+		"fs.move": async (payload) => {
+			const { cwd } = cwdOf(payload);
+			const source = await ensureWorkspacePath(cwd, requireString(payload, "from"));
+			const dir = await ensureWorkspacePath(cwd, requireString(payload, "toDir"));
+			const target = await ensureWorkspaceWritePath(cwd, join(dir, basename(source)));
+			if (target === source) return { path: source };
+			if (target.startsWith(source + sep)) throw new SidebarError("bad-request", "cannot move a folder into itself", 400);
+			await rename(source, target).catch((error) => {
+				throw new SidebarError("fs-error", `cannot move "${source}": ${error instanceof Error ? error.message : String(error)}`, 400);
+			});
+			return { path: target };
+		},
 		"git.worktrees": async (payload) => {
 			const { cwd } = await gitCwdOf(payload);
 			const selected = selectedRepoOf(payload);
@@ -4076,7 +4290,7 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 		},
 		"settings.update": async (payload) => {
 			const settings = getSettings();
-			if (settings === void 0) throw new SidebarError("settings-rejected", "the settings service is not mounted in this deployment", 503);
+			if (settings === void 0) throw new SidebarError("settings-rejected", "the side-card preferences are unavailable", 503);
 			const record = payload;
 			const patch = record?.patch;
 			if (patch === null || typeof patch !== "object" || Array.isArray(patch)) throw new SidebarError("bad-request", "patch must be a plain object");
@@ -4084,7 +4298,7 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 			try {
 				return await settings.update(patch, expectedRevision);
 			} catch (error) {
-				if (error instanceof SettingsConflictError) throw new SidebarError("settings-conflict", error.message, 409);
+				if (error instanceof SidebarPrefsConflictError) throw new SidebarError("settings-conflict", error.message, 409);
 				throw new SidebarError("settings-rejected", error instanceof Error ? error.message : String(error), 400);
 			}
 		},
@@ -4156,11 +4370,102 @@ function buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, ge
 * {@link Config} and fills defaults, direct callers get them from
 * {@link resolveSidebarConfig}.
 */
+/**
+* Zip one workspace directory into the response, code-server style: a real
+* streaming archive with the folder as its root entry. Uses the platform zip
+* (Info-ZIP on POSIX, Compress-Archive on Windows) so no npm dependency enters
+* the host module graph.
+* @param path - absolute directory to archive.
+* @param res - response that receives the zip bytes.
+*/
+async function streamZip(path, res) {
+	const name = basename(path);
+	const headers = {
+		"content-type": "application/zip",
+		"content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(`${name}.zip`)}`,
+		"cache-control": "no-cache"
+	};
+	if (process.platform !== "win32") {
+		const child = spawn("zip", [
+			"-r",
+			"-q",
+			"-",
+			name
+		], {
+			cwd: dirname(path),
+			stdio: [
+				"ignore",
+				"pipe",
+				"ignore"
+			]
+		});
+		let started = false;
+		let settled = false;
+		const fail = (message) => {
+			if (settled) return;
+			settled = true;
+			if (!started) {
+				res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({
+					ok: false,
+					error: {
+						code: "fs-error",
+						message
+					}
+				}));
+			} else res.destroy();
+		};
+		await new Promise((resolve) => {
+			child.once("error", (error) => {
+				fail(`zip unavailable: ${error.message}`);
+				resolve();
+			});
+			child.once("spawn", () => {
+				started = true;
+				res.writeHead(200, headers);
+				child.stdout.pipe(res);
+			});
+			child.once("close", () => {
+				settled = true;
+				resolve();
+			});
+		});
+		return;
+	}
+	const tmp = join(tmpdir(), `dsh-sidebar-${randomUUID()}.zip`);
+	try {
+		await new Promise((resolve, reject) => {
+			const child = spawn("powershell.exe", [
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				`Compress-Archive -LiteralPath '${path.replace(/'/g, "''")}' -DestinationPath '${tmp.replace(/'/g, "''")}' -Force`
+			], { stdio: "ignore" });
+			child.once("error", reject);
+			child.once("close", (code) => code === 0 ? resolve() : reject(/* @__PURE__ */ new Error(`Compress-Archive exited ${String(code)}`)));
+		});
+		const info = await stat(tmp);
+		res.writeHead(200, {
+			...headers,
+			"content-length": String(info.size)
+		});
+		const stream = createReadStream(tmp);
+		stream.on("error", () => res.destroy());
+		stream.on("close", () => {
+			rm(tmp, { force: true });
+		});
+		stream.pipe(res);
+	} catch (error) {
+		await rm(tmp, { force: true }).catch(() => {});
+		throw error;
+	}
+}
 function apply(ctx, config) {
 	ensureSpawnHelper();
 	const resolved = resolveSidebarConfig(config);
+	setOutsideWorkspaceAllowed(resolved.allowOutsideWorkspace);
 	const terminalShell = defaultShell({ explicit: resolved.shell });
-	const fence = (req) => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts);
+	const fence = (req) => isTrustedApiRequest(req, trustedHostsOf(ctx));
 	const nodePty = loadNodePty();
 	if (nodePty === null) {
 		const status = depsStatus();
@@ -4185,49 +4490,28 @@ function apply(ctx, config) {
 			agentPtyRegistry?.disposeAll();
 		}
 	};
-	ctx.inject(["settings"], (sctx) => {
-		const ns = settingsNamespace(SIDEBAR_PREFS_NS);
-		const scope = sctx.settings.register(ns, PrefsSchema);
-		const viewOf = () => {
-			const descriptor = sctx.settings.describe({ redactSecrets: true }).find((candidate) => candidate.ns === ns);
-			return descriptor === void 0 ? {
-				value: void 0,
-				revision: void 0
-			} : {
-				value: descriptor.value,
-				revision: descriptor.revision
-			};
-		};
-		const externalDisable = () => {
-			return (sctx.settings.describe({ redactSecrets: true }).find((candidate) => candidate.ns === "aionui-panel")?.value)?.rightPanel === "aionui-panel";
-		};
-		settingsFace = {
-			get: viewOf,
-			externalDisable,
-			update: async (patch, expectedRevision) => {
-				await sctx.settings.update(ns, patch, expectedRevision);
-				return viewOf();
-			}
-		};
-		syncToolsGate(scope);
-		const syncOpenToolsGate = () => {
-			if (scope.get().agentOpenTools) {
-				if (openToolsDisposers === null) openToolsDisposers = registerOpenTool(ctx, agentOpenRegistry, (sessionId) => sessionCwdOf(ctx, sessionId), () => {
-					const value = (settingsFace?.get())?.value;
-					return value !== null && typeof value === "object" ? value : SIDEBAR_PREFS_DEFAULTS;
-				});
-			} else if (openToolsDisposers !== null) {
-				openToolsDisposers();
-				openToolsDisposers = null;
-				agentOpenRegistry.drainAll();
-			}
-		};
+	const prefsStore = createPrefsStore(join(dshHome(), "sidebar-lite", "prefs.json"), (message) => ctx.logger?.warn(`[dsh-sidebar-lite] ${message}`));
+	settingsFace = {
+		get: () => prefsStore.view(),
+		externalDisable: () => false,
+		update: (patch, expectedRevision) => prefsStore.update(patch, expectedRevision)
+	};
+	syncToolsGate(prefsStore);
+	const syncOpenToolsGate = () => {
+		if (prefsStore.get().agentOpenTools) {
+			if (openToolsDisposers === null) openToolsDisposers = registerOpenTool(ctx, agentOpenRegistry, (sessionId) => sessionCwdOf(ctx, sessionId), () => prefsStore.get());
+		} else if (openToolsDisposers !== null) {
+			openToolsDisposers();
+			openToolsDisposers = null;
+			agentOpenRegistry.drainAll();
+		}
+	};
+	syncOpenToolsGate();
+	prefsStore.watch(() => {
+		syncToolsGate(prefsStore);
 		syncOpenToolsGate();
-		scope.watch(() => {
-			syncToolsGate(scope);
-			syncOpenToolsGate();
-		});
 	});
+	prefsStore.load();
 	const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace);
 	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
@@ -4299,8 +4583,9 @@ function apply(ctx, config) {
 				const dir = url.searchParams.get("dir");
 				const relativePath = url.searchParams.get("relativePath");
 				if (sessionId === null || dir === null || relativePath === null || relativePath.trim() === "") throw new SidebarError("bad-request", "sessionId, dir, and relativePath are required");
+				const clientCwd = url.searchParams.get("cwd") ?? void 0;
 				const { path, size } = await writeWorkspaceUpload({
-					cwd: sessionCwdOf(ctx, sessionId, url.searchParams.get("cwd") ?? void 0),
+					cwd: resolved.allowOutsideWorkspace && clientCwd !== void 0 && isAbsolute(clientCwd) ? clientCwd : sessionCwdOf(ctx, sessionId, clientCwd),
 					dir,
 					relativePath,
 					chunks: req,
@@ -4337,14 +4622,30 @@ function apply(ctx, config) {
 				if (sessionId === null || raw === null) throw new SidebarError("bad-request", "sessionId and path are required");
 				const path = await ensureWorkspacePath(sessionCwdOf(ctx, sessionId, url.searchParams.get("cwd") ?? void 0), raw);
 				const info = await stat(path);
-				if (!info.isFile() || info.size > resolved.mediaLimit) throw new SidebarError("fs-error", "not a file or too large", 400);
+				if (url.searchParams.get("download") === "1" && info.isDirectory()) {
+					await streamZip(path, res);
+					return;
+				}
+				if (!info.isFile()) throw new SidebarError("fs-error", "not a file", 400);
+				if (url.searchParams.get("download") === "1") {
+					res.writeHead(200, {
+						"content-type": "application/octet-stream",
+						"content-length": String(info.size),
+						"content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`,
+						"cache-control": "no-cache"
+					});
+					const stream = createReadStream(path);
+					stream.on("error", () => res.destroy());
+					stream.pipe(res);
+					return;
+				}
+				if (info.size > resolved.mediaLimit) throw new SidebarError("fs-error", "not a file or too large", 400);
 				const type = mediaTypeForPath(path);
 				const body = await readFile(path);
 				const headers = {
 					"content-type": type,
 					"cache-control": "no-cache"
 				};
-				if (url.searchParams.get("download") === "1") headers["content-disposition"] = `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`;
 				res.writeHead(200, headers);
 				res.end(body);
 			} catch (error) {
@@ -4529,9 +4830,11 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 			ws.close(1011, PTY_DEPS_MISSING);
 			return;
 		}
-		const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get("cwd") ?? void 0);
+		const terminalClientCwd = url.searchParams.get("cwd") ?? void 0;
+		const cwd = resolved.allowOutsideWorkspace && terminalClientCwd !== void 0 && isAbsolute(terminalClientCwd) ? terminalClientCwd : sessionCwdOf(ctx, sessionId, terminalClientCwd);
 		const overrides = shellOverridesOf(getSettings);
 		const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs);
+		handle.views += 1;
 		if (handle.transcript !== "") ws.send(handle.transcript);
 		const onData = (data) => {
 			if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 4194304) ws.send(data);
@@ -4549,7 +4852,7 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 				if (parsed !== null && typeof parsed === "object") control = parsed;
 			} catch {}
 			if (control !== null && control.type === "close") {
-				ptyManager.scheduleClose(handle.key, 0);
+				if (handle.views <= 1) ptyManager.scheduleClose(handle.key, 0);
 				return;
 			}
 			if (control !== null && control.type === "park") {
@@ -4565,6 +4868,7 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 		ws.on("close", () => {
 			dataSub.dispose();
 			exitSub.dispose();
+			handle.views = Math.max(0, handle.views - 1);
 			if (!ptyManager.isParked(handle.key)) ptyManager.scheduleClose(handle.key, resolved.reconnectGraceMs);
 		});
 	} catch (error) {
@@ -4611,4 +4915,4 @@ function pumpAgentTerminal(registry, handle, ws) {
 	});
 }
 //#endregion
-export { Config, apply, inject, mediaTypeForPath, name };
+export { Config, SidebarPrefsConflictError, apply, inject, mediaTypeForPath, name };

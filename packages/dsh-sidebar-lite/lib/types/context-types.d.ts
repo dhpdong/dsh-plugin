@@ -68,6 +68,8 @@ export interface SidebarWebUpgradeRoute {
 export interface SidebarWebServer {
     register(route: SidebarWebRoute): () => void;
     registerUpgrade(route: SidebarWebUpgradeRoute): () => void;
+    /** The listener's concrete bind address (feeds the trust fence). */
+    readonly host?: string;
 }
 /** A published session's header slice the sidebar reads (authoritative cwd). */
 export interface SidebarSessionHeader {
@@ -78,21 +80,22 @@ export interface SidebarSessionStore {
     get(id: string): {
         header: SidebarSessionHeader;
         /**
-         * The live session's append-only event log (immutable snapshot; absent
-         * on sessions the runtime has not hydrated). Read-only access — the
-         * jobs.output route replays `job_output` tool/result rows from it.
+         * The live session's append-only event log as an immutable snapshot
+         * (0.2 replaced the `events` property with `snapshotEvents()`).
+         * Read-only access — the jobs.output route replays `job_output`
+         * tool/result rows from it.
          */
-        events?: readonly SidebarSessionEvent[];
+        snapshotEvents?(): readonly SidebarSessionEvent[];
     } | undefined;
 }
 /**
- * The web runtime service face (mirror of @deepseek-ai/dsh-web-app's
- * WebRuntimeValues): the bind-derived trust list the /api gateway's fence
- * accepts — LAN IP literals sampled when the server binds all interfaces,
- * plus explicit `--trusted-host` authorities.
+ * The web startup service face (mirror of @deepseek-ai/dsh-web-app's
+ * WebStartupValues): explicit `--trusted-host` authorities. 0.2 moved the
+ * bind-derived trust list off a dedicated runtime service; the listener's
+ * own `webServer.host` joins this list at the fence.
  */
-export interface SidebarWebRuntime {
-    trustedHosts: readonly string[];
+export interface SidebarWebStartup {
+    trustedHosts?: readonly string[];
 }
 /** Registration options the sidebar passes to `ctx.slots.register` (subset of the real options). */
 export interface SidebarSlotRegisterOptions {
@@ -279,12 +282,16 @@ export interface SidebarSessionTitleService {
  *  service): detached inspection of a persisted session, used to compose the
  *  recorded preset when a Side Chat thread cold-resumes. */
 export interface SidebarSessionPersistenceService {
-    inspect(sessionId: string): Promise<{
-        meta: {
+    /** Open a read handle; the caller owns closing it. */
+    open(sessionId: string, access: 'read'): Promise<{
+        header: {
             cwd?: string;
             agentPreset?: string;
         };
-        events: readonly SidebarSessionEvent[];
+        read(): Promise<{
+            events: readonly SidebarSessionEvent[];
+        }>;
+        close(): Promise<void>;
     }>;
 }
 /** RPC result slot mirror (`RpcResult<T>` on the wire). */
@@ -334,7 +341,8 @@ export interface SidebarConnectionHandle {
 }
 /** The client session list snapshot the sidebar subscribes to. */
 export interface SidebarSessionList {
-    current: string | undefined;
+    /** Host list order; the current Session is the one retained by `mainView`. */
+    ids: readonly string[];
     byId: Record<string, SidebarSessionSummary>;
     /** Direct durable catalogs keyed by their selected parent address. */
     subagentsByParent?: Readonly<Record<string, SidebarSubagentCatalog>>;
@@ -447,45 +455,6 @@ export interface SidebarWorkspacesService {
     openPath(path: string): Promise<void>;
 }
 /**
- * The invariant service face (mirror of @deepseek-ai/dsh-invariants'
- * InvariantRegistry). The upstream augmentation does not reach this Context
- * (dual-cordis-instance resolution), so the register signature is restated
- * structurally, exactly like the other service faces above.
- */
-export interface SidebarInvariantsService {
-    /** Reserve one package's checks and install them in the service's child fiber. */
-    register(packageName: string, installer: (ctx: Context, fail: (message: string) => never) => void | Promise<void>): () => void;
-}
-/** The settings service face (mirror of @deepseek-ai/dsh-settings' SettingsProvider). */
-export interface SidebarSettingsService {
-    /**
-     * Register one namespace schema (the resolved value layers schema defaults,
-     * then the composition base, then the user document).
-     */
-    register<T>(ns: string, schema: unknown, options?: {
-        base?: Partial<T>;
-        applies?: 'live' | 'restart';
-    }): {
-        get(): T;
-        watch(callback: (next: T, prev: T) => void | Promise<void>): () => void;
-        update(patch: object): Promise<void>;
-        replace(section: object): Promise<void>;
-    };
-    /** Redacted descriptors of every registered namespace (secrets stripped). */
-    describe(options?: {
-        redactSecrets?: boolean;
-    }): Array<{
-        ns: string;
-        value?: unknown;
-        base?: unknown;
-        user?: unknown;
-        applies: 'live' | 'restart';
-        revision: number;
-    }>;
-    /** Service-level merge write with the revision guard (a stale writer is refused). */
-    update(ns: string, patch: object, expectedRevision?: number): Promise<void>;
-}
-/**
  * The tools service face (mirror of @deepseek-ai/dsh-tools' ToolRuntime).
  * The host half registers model-facing tools here; the registry attaches the
  * returned disposer to the contributing fiber so unloading unregisters them.
@@ -522,16 +491,12 @@ export interface SidebarContextShape {
     sessions: SidebarSessionStore & SidebarSessionsService;
     /** The wire handle the Side Chat transcript polls through. */
     connection: SidebarConnectionHandle;
-    /** The web runtime trust list (bind-derived). */
-    webRuntime: SidebarWebRuntime;
+    /** The web startup trust list (explicit authorities). */
+    webStartup: SidebarWebStartup;
     /** The client slot registry (register/inject). */
     slots: SidebarSlotsService;
     /** The client workspaces service face (file-open funnel). */
     workspaces: SidebarWorkspacesService;
-    /** The settings service face (prefs persistence + namespace reads). */
-    settings: SidebarSettingsService;
-    /** The invariant registry face. */
-    invariants: SidebarInvariantsService;
     /** The tool registry face. */
     tools: SidebarToolsService;
     /** The client locale service face. */

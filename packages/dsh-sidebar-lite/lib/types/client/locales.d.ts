@@ -69,6 +69,7 @@ export declare const zh: {
     terminalLimit: string;
     close: string;
     closeOtherTabs: string;
+    renameTab: string;
     closeLeftTabs: string;
     closeRightTabs: string;
     moveToFreeWindow: string;

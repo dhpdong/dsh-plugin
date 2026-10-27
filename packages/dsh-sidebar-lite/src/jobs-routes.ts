@@ -211,7 +211,11 @@ export function buildJobsApi(ctx: Context, outputLimit: number): SidebarJobsRout
       // Merge the store's event log (durable seed + whatever it received)
       // with the live mirror, deduped by seq — a trace never double-counts.
       const bySeq = new Map<number, JobOutputTrace>()
-      for (const event of ctx.sessions.get(sessionId)?.events ?? []) {
+      const liveSession = ctx.sessions.get(sessionId) as unknown as
+        | { snapshotEvents?(): readonly SidebarSessionEvent[]; events?: readonly SidebarSessionEvent[] }
+        | undefined
+      const liveEvents = liveSession?.snapshotEvents?.() ?? liveSession?.events ?? []
+      for (const event of liveEvents) {
         const trace = traceOf(event)
         if (trace !== undefined) bySeq.set(trace.seq, trace)
       }

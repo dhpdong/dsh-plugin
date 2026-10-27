@@ -22,10 +22,17 @@
  */
 import { randomUUID } from 'node:crypto'
 import { createUserMessage, type ContentBlock, type UserMessage } from '@deepseek-ai/dsh-llm'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Sidebar-lite injected context (the side-conversation boundary). */
+    plugin: { kind: 'plugin'; plugin: string }
+  }
+}
 import type { Agent, AgentSetup, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import type { Context as CordisContext } from '@deepseek-ai/cordis'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type {
   Context,
   SidebarAgentPresetsService,
@@ -94,17 +101,39 @@ async function composeChildSetup(
   }
 }
 
+/**
+ * Read a persisted session's header + complete log through the 0.2 handle
+ * API (`open`/`read`/`close`). The old detached `inspect` method was removed
+ * when persistence moved to per-session handles.
+ * @param ctx - host context carrying the optional persistence service.
+ * @param sessionId - persisted session id.
+ * @returns the header and event log, or undefined when unavailable.
+ */
+async function readPersistedSession(
+  ctx: Context,
+  sessionId: string,
+): Promise<{ meta: { cwd?: string; agentPreset?: string }; events: readonly SessionEvent[] } | undefined> {
+  const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
+  if (persistence === undefined) return undefined
+  const handle = await persistence.open(sessionId, 'read')
+  try {
+    const { events } = await handle.read()
+    return { meta: handle.header, events: events as unknown as readonly SessionEvent[] }
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Build the cold-resume setup from the thread's PERSISTED record (the
  *  recorded preset wins, newest selection event first). */
 async function composePersistedSetup(
   ctx: Context,
   childId: string,
 ): Promise<AgentSetup> {
-  const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
-  if (persistence === undefined) {
+  const inspected = await readPersistedSession(ctx, childId)
+  if (inspected === undefined) {
     return () => Promise.resolve()
   }
-  const inspected = await persistence.inspect(childId)
   const presetId = resolvePresetId(inspected.meta, inspected.events)
   const presets = ctx.get('agentPresets') as SidebarAgentPresetsService | undefined
   if (presets === undefined || presetId === undefined) {
@@ -166,11 +195,11 @@ export function buildSidechatApi(ctx: Context): SidechatRoutes {
       }
       const parentSession = parent.session
       const inheritance = buildSidechatInheritance(
-        parentSession.events as unknown as readonly SidechatLogEvent[],
+        parentSession.snapshotEvents() as unknown as readonly SidechatLogEvent[],
       )
       const { agentPreset, setup } = await composeChildSetup(
         ctx,
-        resolvePresetId(parentSession.header, parentSession.events),
+        resolvePresetId(parentSession.header, parentSession.snapshotEvents()),
       )
       const childId = `session-${randomUUID()}` as SessionId
       const label = question === '' ? SIDE_NEW_THREAD_TITLE : sideLabel(question)
@@ -198,11 +227,12 @@ export function buildSidechatApi(ctx: Context): SidechatRoutes {
         meta: {
           ...(parentSession.header.cwd === undefined ? {} : { cwd: parentSession.header.cwd }),
           parentSession: parentSession.id,
-          seedLength: seed.length,
+          isSeeded: true,
           origin: 'subagent',
           delegationDepth: (parentSession.header.delegationDepth ?? 0) + 1,
           ...(agentPreset === undefined ? {} : { agentPreset }),
         },
+        inheritedEventCount: inheritance.seed.length as unknown as SessionLogOffset,
         seed: seed as unknown as readonly SessionEvent[],
         agentOptions: { ...parent.options },
         setup,
@@ -267,7 +297,7 @@ export function buildSidechatApi(ctx: Context): SidechatRoutes {
           throw new SidebarError('sidechat-error', `thread resume failed: ${error instanceof Error ? error.message : String(error)}`, 500)
         }
       }
-      if (boundaryDelivered(agent.session.events as unknown as readonly SidechatLogEvent[])) {
+      if (boundaryDelivered(agent.session.snapshotEvents() as unknown as readonly SidechatLogEvent[])) {
         admitFollowup(agent, textPrompt(text))
       } else {
         // First message of an immediately-created thread: it carries the
@@ -328,10 +358,10 @@ export function buildSidechatApi(ctx: Context): SidechatRoutes {
         }
       }
       // Cold thread: only the persisted preset is worth reading back.
-      const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
-      if (persistence !== undefined) {
+      {
         try {
-          const inspected = await persistence.inspect(childId)
+          const inspected = await readPersistedSession(ctx, childId)
+          if (inspected === undefined) return { live: false }
           const preset = resolvePresetId(inspected.meta, inspected.events)
           return { live: false, ...(preset === undefined ? {} : { preset }) }
         } catch {

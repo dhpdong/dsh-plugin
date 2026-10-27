@@ -1,14 +1,14 @@
 # dsh-sidebar-lite
 
-> [!NOTE]
-> **Personal fork**: this repository is a locally customized fork of [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) and is **not published to npm** — the npm install commands, badges, and ecosystem links below refer to the upstream project. Install from a local path as described in "From source / development".
+> [!IMPORTANT]
+> **This fork now runs in "native right Sidebar" mode (DSH 0.2.1-rc.2).** The upstream documentation below describes the original full workbench; in this fork:
 >
-> **Added on top of upstream:**
+> - **The plugin's own right workbench is retired** (`RIGHT_PANEL_ENABLED = false`): no right panel, no corner expand button, no guide entry; editor / Git / browser tabs are no longer offered.
+> - **File-tree operations move to DSH's native right Sidebar + [`dsh-native-file-ops`](../dsh-native-file-ops)**: context-menu create file/folder, rename, download, move to trash, copy path, and drag-to-move. The host half of this package still supplies the `/sidebar/api/fs.*` and `/sidebar/file?download=1` carriers (and keeps `fs.trash` / `fs.create`).
+> - **The bottom terminal panel stays**: when the native right Sidebar is open, the terminal docks UNDER it (file tree above, terminal below); closing either restores the previous layout.
+> - **0.2.1-rc.2 compatibility**: the 0.1 surfaces (`webRuntime`, `ctx.settings.register`, `invariants`, client `workspaces.openPath`) are gone; the plugin now uses the 0.2 services / slots / module table.
 >
-> - 🗑️ **Move to Trash**: right-click any file / subfolder in the tree → "Move to Trash" — the target goes to the **OS trash** (restorable from there). The workspace root is excluded; a symlink row deletes the link itself, never its target.
-> - 📄 **New file / 📁 New folder**: create entries directly from the tree's context menu. Right-clicking a **folder** creates inside it; right-clicking a **file** creates in its parent directory; a collapsed target directory auto-expands. A newly created file opens in the editor automatically; an existing name is **refused, never overwritten**; names are single-segment only (no `/`, `\`, `.`, `..` traversal parts).
->
-> Both features pass the same workspace path-security fence as upload/write (see `trashWorkspacePath` / `createWorkspaceEntry` in `src/fs-operations.ts` and `tests/fs-operations.spec.ts`).
+> This is a local fork of [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar), **not published to npm** — the npm commands, badges, and ecosystem links below refer to the upstream project. Install from a local path as described in "From source / development".
 
 <!-- Hero -->
 <div align="center">
@@ -19,10 +19,10 @@
   <a href="https://github.com/omdsh-dev/dsh-sidebar-lite/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/omdsh-dev/dsh-sidebar-lite" /></a>
   <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
   <a href="https://dshfind.com/en/plugins/omdsh-dev/dsh-sidebar-lite?ref=badge"><img alt="dshfind" src="https://dshfind.com/api/badge/omdsh-dev/dsh-sidebar-lite?lang=en" /></a><br /><br />
-  <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a>
+  <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a>
   <a href="https://github.com/topics/dsh-sidebar-lite"><img alt="Plugin ecosystem: GitHub topic dsh-sidebar-lite" src="https://img.shields.io/badge/plugin%20ecosystem-topic%20dsh--better--sidebar-4d6bfe" /></a><br /><br />
   <img alt="File management" src="https://img.shields.io/badge/-File%20management-4d6bfe" /> <img alt="Edit &amp; preview" src="https://img.shields.io/badge/-Edit%20%26%20preview-4d6bfe" /> <img alt="Embedded browser" src="https://img.shields.io/badge/-Embedded%20browser-4d6bfe" /> <img alt="Real terminal" src="https://img.shields.io/badge/-Real%20terminal-4d6bfe" /> <img alt="Git panel" src="https://img.shields.io/badge/-Git%20panel-4d6bfe" /> <img alt="Background tasks" src="https://img.shields.io/badge/-Background%20tasks-4d6bfe" /> <img alt="Side Chat" src="https://img.shields.io/badge/-Side%20Chat-4d6bfe" /> <img alt="Plugin integration" src="https://img.shields.io/badge/-Plugin%20integration-4d6bfe" /><br /><br />
-  <b>A dual workbench (right sidebar + bottom panel)</b> that opens its <code>ctx.betterSidebar</code> service to every plugin —<br />
+  <b>This fork: native right Sidebar + bottom terminal</b>; host capabilities via <code>ctx.betterSidebar</code> and <code>/sidebar/api</code> —<br />
   register new sidebar pages and file viewers via <code>registerTab</code> / <code>registerFileViewer</code>.
 </div>
 
@@ -50,6 +50,8 @@
 
 ## ✨ Features
 
+> This fork keeps only the bottom terminal panel; the right-workbench features below (editor / Git / browser / Side Chat / free windows) describe upstream and require `RIGHT_PANEL_ENABLED = true`.
+
 - **🗂️ File Workbench**: file explorer (lazy-loading tree; symlinks show their target kind — directory links expand, dangling links flagged) + CodeMirror editor; inline preview for images / Markdown (incl. Mermaid diagrams, strict-mode safe rendering + click-to-zoom) / HTML / PDF
 - **🌐 Embedded Browser**: multiple web tabs with back / forward / refresh; content runs in a sandboxed iframe; external links are routed by protocol by default — HTTP opens in the sidebar, HTTPS goes to the system browser (both adjustable in settings)
 - **💻 Real Terminal**: xterm.js + node-pty real shell, reconnect with transcript replay; optionally injects `terminal_*` tools for the model
@@ -71,7 +73,31 @@
 **Prerequisites**: DSH installed (`dsh web` boots), Node.js ≥ 20, pnpm ≥ 10.
 
 **Supported DSH versions**:
-<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a>
+<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a>
+
+### From source (this fork, recommended)
+
+This fork is not published to npm; mount the local packages:
+
+```jsonc
+// ~/.dsh/profiles/web/package.json
+{
+  "dependencies": {
+    "dsh-sidebar-lite": "file:<repo>/packages/dsh-sidebar-lite",
+    "dsh-native-file-ops": "file:<repo>/packages/dsh-native-file-ops"
+  },
+  "dsh": { "profile": { "bundles": [/* … */, "dsh-sidebar-lite", "dsh-native-file-ops"] } }
+}
+```
+
+```sh
+cd ~/.dsh/profiles/web && pnpm install
+cd /path/to/dsh-plugin && dsh web --no-open
+```
+
+`lib/` ships with the repository, so no build is needed; after changing source run `cd packages/dsh-sidebar-lite && pnpm install && pnpm build` and sync `lib/` into the profile copy. The file-tree context menu / drag-move need `dsh-native-file-ops` installed too.
+
+### Upstream npm install (original project, not this fork)
 
 ```sh
 dsh plugin --profile web add dsh-sidebar-lite@latest   # first run fails: pnpm 11 blocks node-pty build scripts (the dependency is still written)
@@ -119,28 +145,20 @@ or bump the version in `~/.dsh/profiles/web/package.json` (e.g. `"^0.16.1"`) and
 </details>
 
 <details>
-<summary><b>Install from source / develop (optional — alternative to the npm flow)</b></summary>
-
-To debug local changes or track the dev branch, point the dependency at a local clone and build it yourself:
+<summary><b>Install from source / develop (this fork)</b></summary>
 
 ```text
-1. git clone https://github.com/omdsh-dev/dsh-sidebar-lite.git ~/Code/dsh-sidebar-lite
-   cd ~/Code/dsh-sidebar-lite && pnpm install && pnpm build
-2. In ~/.dsh/profiles/web/package.json dependencies write "dsh-sidebar-lite": "link:<absolute path of the clone>"
-3. Append this mount line to ~/.dsh/profiles/web/cordis.patch.yml (to pick the terminal shell, add `config.shell`; `config.shellArgs` starts it with explicit args — when non-empty they replace the default `-l`. When omitted the host resolves `$SHELL` / the login shell / powershell.exe):
-   - insert:
-       - id: sidebar-lite
-         name: 'dsh-sidebar-lite'
-         config:
-           shell: /bin/zsh
-           shellArgs:
-             - --noprofile
-             - --no-rc
-4. Run pnpm install in ~/.dsh/profiles/web
-5. Restart DSH and hard-refresh
+1. git clone https://github.com/dhpdong/dsh-plugin.git ~/Code/dsh-plugin
+2. In ~/.dsh/profiles/web/package.json dependencies point at this repository:
+   "dsh-sidebar-lite": "file:<repo>/packages/dsh-sidebar-lite"
+   "dsh-native-file-ops": "file:<repo>/packages/dsh-native-file-ops"
+3. Add "dsh-sidebar-lite" and "dsh-native-file-ops" to dsh.profile.bundles in the same file
+   (no hand-written insert in cordis.patch.yml — the bundle patch mounts them)
+4. cd ~/.dsh/profiles/web && pnpm install
+5. dsh web --no-open, then hard-refresh the browser
 ```
 
-Update: `git pull && pnpm install && pnpm build` → just hard-refresh the browser (client changes hot-reload; only host-half changes need a DSH restart). To switch back to the npm channel, restore `"dsh-sidebar-lite": "^0.16.1"` and re-run `pnpm install`.
+After changing source: `cd packages/dsh-sidebar-lite && pnpm install && pnpm build`, then sync `lib/` into the profile's `node_modules/dsh-sidebar-lite/lib/`.
 
 </details>
 
@@ -268,7 +286,7 @@ The GitHub topic [`dsh-sidebar-lite`](https://github.com/topics/dsh-sidebar-lite
   <a href="https://github.com/user-attachments/assets/946f7028-4967-461e-a750-d1b5056b62d0"><img width="33%" alt="Service API base screenshot" src="https://github.com/user-attachments/assets/946f7028-4967-461e-a750-d1b5056b62d0" /></a>
 </div>
 
-**Supported DSH versions**: <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a> · full release history on the [Releases](https://github.com/omdsh-dev/dsh-sidebar-lite/releases) page
+**Supported DSH versions**: <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="Supported DSH versions: 0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a> · full release history on the [Releases](https://github.com/omdsh-dev/dsh-sidebar-lite/releases) page
 
 ### v0.16.1
 

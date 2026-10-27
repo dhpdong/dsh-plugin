@@ -1,14 +1,14 @@
 # dsh-sidebar-lite
 
-> [!NOTE]
-> **个人 fork**：本仓库是 [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 的本地定制版，**未发布到 npm**——下文的 npm 安装命令、徽章与插件生态均针对原项目。请按「从源码安装 / 开发」一节以本地路径方式安装。
+> [!IMPORTANT]
+> **本 fork 已改为「原生右侧栏」形态（适配 DSH 0.2.1-rc.2）。** 下方上游文档描述的是原版完整工作台；在本 fork 中：
 >
-> **本 fork 在原版基础上新增：**
+> - **插件自带的右侧工作台已停用**（`RIGHT_PANEL_ENABLED = false`）：不再渲染右侧面板、右上角展开按钮或启动页入口；编辑器 / Git / 浏览器 tab 不再提供。
+> - **文件树操作改由 DSH 原生右侧栏 + [`dsh-native-file-ops`](../dsh-native-file-ops) 提供**：右键新建文件/文件夹、重命名、下载、移到回收站、复制路径，以及拖拽移动。宿主端由本包的 `/sidebar/api/fs.*`、`/sidebar/file?download=1` 提供能力；`fs.trash` / `fs.create` 仍保留在宿主中。
+> - **底部终端面板保留**：原生右侧栏打开时，终端停靠到右侧栏下方（文件树在上、终端在下）；关闭右侧栏或终端后恢复原布局。
+> - **0.2.1-rc.2 适配**：移除 `webRuntime`、`ctx.settings.register`、`invariants`、客户端 `workspaces.openPath` 等 0.1 接口，改用 0.2 的服务 / 槽位 / 模块表。
 >
-> - 🗑️ **移到回收站**：文件树右键任意文件 / 子文件夹 → 「移到回收站」，目标被移入**系统回收站**（可从回收站还原）。工作区根目录不提供该操作；符号链接只删除链接本身，不动其目标。
-> - 📄 **新建文件 / 📁 新建文件夹**：文件树右键菜单可直接创建。右键**文件夹**在其中创建；右键**文件**在其父目录创建；目标目录折叠时自动展开。新建的文件自动在编辑器中打开；同名条目已存在时**拒绝覆盖**并报错；名称只允许单层（禁 `/`、`\`、`.`、`..` 穿越片段）。
->
-> 两项功能均经过 workspace 路径安全校验（与上传 / 写入同一套围栏），详见 `src/fs-operations.ts` 的 `trashWorkspacePath` / `createWorkspaceEntry` 及 `tests/fs-operations.spec.ts`。
+> 本 fork 是 [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 的本地定制版，**未发布到 npm**——下文的 npm 安装命令、徽章与插件生态均针对原项目。请按「从源码安装 / 开发」一节以本地路径方式安装。
 
 <!-- Hero -->
 <div align="center">
@@ -19,10 +19,10 @@
   <a href="https://github.com/omdsh-dev/dsh-sidebar-lite/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/omdsh-dev/dsh-sidebar-lite" /></a>
   <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
   <a href="https://dshfind.com/zh/plugins/omdsh-dev/dsh-sidebar-lite?ref=badge"><img alt="dshfind" src="https://dshfind.com/api/badge/omdsh-dev/dsh-sidebar-lite?lang=zh" /></a><br /><br />
-  <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a>
+  <a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a>
   <a href="https://github.com/topics/dsh-sidebar-lite"><img alt="插件生态：GitHub topic dsh-sidebar-lite" src="https://img.shields.io/badge/%E6%8F%92%E4%BB%B6%E7%94%9F%E6%80%81-topic%20dsh--better--sidebar-4d6bfe" /></a><br /><br />
   <img alt="文件管理" src="https://img.shields.io/badge/-文件管理-4d6bfe" /> <img alt="编辑预览" src="https://img.shields.io/badge/-编辑预览-4d6bfe" /> <img alt="内嵌浏览器" src="https://img.shields.io/badge/-内嵌浏览器-4d6bfe" /> <img alt="真实终端" src="https://img.shields.io/badge/-真实终端-4d6bfe" /> <img alt="Git 面板" src="https://img.shields.io/badge/-Git%20面板-4d6bfe" /> <img alt="后台任务" src="https://img.shields.io/badge/-后台任务-4d6bfe" /> <img alt="侧边对话" src="https://img.shields.io/badge/-侧边对话-4d6bfe" /> <img alt="插件接入" src="https://img.shields.io/badge/-插件接入-4d6bfe" /><br /><br />
-  <b>右侧栏 + 底部面板双工作台</b>，并把 <code>ctx.betterSidebar</code> 服务开放给所有插件——<br />
+  <b>本 fork：原生右侧栏 + 底部终端面板</b>，宿主能力经 <code>ctx.betterSidebar</code> 与 <code>/sidebar/api</code> 提供——<br />
   通过 <code>registerTab</code> / <code>registerFileViewer</code> 注册新的侧边栏页面与文件预览器。
 </div>
 
@@ -50,6 +50,8 @@
 
 ## ✨ 功能一览
 
+> 本 fork 只保留底部终端面板；下面的右侧工作台功能（编辑器 / Git / 浏览器 / 侧边对话 / 自由窗口等）描述的是上游原版，除非把 `RIGHT_PANEL_ENABLED` 改回 `true`。
+
 - **🗂️ 文件工作台**：资源管理器（懒加载目录树；软链接按目标类型展示——目录软链接可展开、失效链接标红）+ CodeMirror 编辑器；图片 / Markdown（含 Mermaid 图表，strict 安全渲染 + 点击放大；README 级内嵌 HTML——徽章墙 / `<details>` 折叠 / 表格内联标签经 DOMPurify 消毒真实渲染；浮动目录大纲一键跳转）/ HTML / PDF
 - **🌐 内嵌浏览器**：多开网页 tab，后退 / 前进 / 刷新；内容运行在沙箱 iframe；外链默认按协议分流——HTTP 在侧边栏打开、HTTPS 走系统浏览器（设置页可分别调整）
 - **💻 真实终端**：xterm.js + node-pty 真实 shell，断线重连回放；可选为模型注入 `terminal_*` 工具
@@ -71,7 +73,47 @@
 **前置**：已装好 DSH（`dsh web` 能正常运行），Node.js ≥ 20、pnpm ≥ 10。
 
 **支持的 DSH 版本**：
-<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a>
+<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a>
+
+### 从源码安装（本 fork，推荐）
+
+本 fork 未发布 npm，直接挂本地路径：
+
+```jsonc
+// ~/.dsh/profiles/web/package.json
+{
+  "dependencies": {
+    "dsh-sidebar-lite": "file:<仓库>/packages/dsh-sidebar-lite",
+    "dsh-native-file-ops": "file:<仓库>/packages/dsh-native-file-ops"
+  },
+  "dsh": { "profile": { "bundles": [/* … */, "dsh-sidebar-lite", "dsh-native-file-ops"] } }
+}
+```
+
+```sh
+cd ~/.dsh/profiles/web && pnpm install
+cd /path/to/dsh-plugin && dsh web --no-open
+```
+
+`lib/` 已随仓库分发，无需构建；修改源码后 `cd packages/dsh-sidebar-lite && pnpm install && pnpm build`，再把 `lib/` 同步到 profile 的安装副本。文件树的右键/拖拽操作需要同时安装 `dsh-native-file-ops`。
+
+**终端页签（本 fork 的表现）**：右侧面板关闭时，底部面板的 `+` 直接新建终端（不再弹出
+explorer/git/子代理/侧边对话/浏览器 的菜单）；终端标题按序号区分（`bash`、`bash 2`…），
+右键页签有 **重命名**；同一位置的终端在所有工作区之间共享（切工作区挂回同一个 shell），
+关闭其中一个不会让别的页签发「process exited」。
+
+**全局文件浏览器开关**：`dsh-native-file-ops` 把原生 Files 页签接管成「任意根目录」的浏览器，需要宿主的 `/sidebar/api/fs.*` 接受工作区之外的绝对路径：
+
+```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
+- id: sidebar-lite
+  config:
+    allowOutsideWorkspace: true   # 默认 false：保持会话工作区围栏
+```
+
+打开后 `fs.tree / fs.read / fs.write / fs.create / fs.rename / fs.move / fs.trash / fs.manifest`、`/sidebar/file` 媒体与上传路由、以及终端 WebSocket 的 `cwd` 都以客户端给的绝对路径为准；终端因此可以跟随文件浏览器的根目录启动。风险由使用者承担——这是本机开发场景下的显式选择。
+
+### 上游 npm 安装（原版，不适用于本 fork）
 
 ```sh
 dsh plugin --profile web add dsh-sidebar-lite@latest   # 首次会因 pnpm 11 拦截 node-pty 构建脚本而失败（依赖已写入）
@@ -119,28 +161,20 @@ dsh plugin --profile web add dsh-sidebar-lite@latest
 </details>
 
 <details>
-<summary><b>从源码安装 / 开发（可选，替代 npm 方式）</b></summary>
-
-调试本地改动或跟随开发分支时，把依赖指向本地克隆并自行构建：
+<summary><b>从源码安装 / 开发（本 fork）</b></summary>
 
 ```text
-1. git clone https://github.com/omdsh-dev/dsh-sidebar-lite.git ~/Code/dsh-sidebar-lite
-   cd ~/Code/dsh-sidebar-lite && pnpm install && pnpm build
-2. ~/.dsh/profiles/web/package.json 的 dependencies 写 "dsh-sidebar-lite": "link:<克隆目录绝对路径>"
-3. ~/.dsh/profiles/web/cordis.patch.yml 追加挂载行（需要指定终端 shell 时，在行内加 `config.shell`；`config.shellArgs` 可带参启动，非空时替换默认的 `-l`。不填则自动解析 `$SHELL` / 登录 shell / powershell.exe）：
-   - insert:
-       - id: sidebar-lite
-         name: 'dsh-sidebar-lite'
-         config:
-           shell: /bin/zsh
-           shellArgs:
-             - --noprofile
-             - --no-rc
-4. 在 ~/.dsh/profiles/web 执行 pnpm install
-5. 硬刷新浏览器（Cmd/Ctrl+Shift+R）即可看到效果（client 改动无需重启 DSH；host 半改动才需重启）
+1. git clone https://github.com/dhpdong/dsh-plugin.git ~/Code/dsh-plugin
+2. ~/.dsh/profiles/web/package.json 的 dependencies 指向本仓库：
+   "dsh-sidebar-lite": "file:<仓库>/packages/dsh-sidebar-lite"
+   "dsh-native-file-ops": "file:<仓库>/packages/dsh-native-file-ops"
+3. 同一文件的 dsh.profile.bundles 加入 "dsh-sidebar-lite" 与 "dsh-native-file-ops"
+   （cordis.patch.yml 不需要手写 insert，bundle patch 会自动挂载）
+4. cd ~/.dsh/profiles/web && pnpm install
+5. dsh web --no-open，然后硬刷新浏览器
 ```
 
-更新：`git pull && pnpm install && pnpm build` → 硬刷新浏览器即可（client 改动热加载生效，无需重启 DSH；host 半改动才需重启）。切回 npm 通道时，把依赖改回 `"dsh-sidebar-lite": "^0.16.1"` 再 `pnpm install`。
+修改源码后：`cd packages/dsh-sidebar-lite && pnpm install && pnpm build`，再把 `lib/` 同步到 profile 的 `node_modules/dsh-sidebar-lite/lib/`。
 
 </details>
 
@@ -263,7 +297,7 @@ GitHub topic [`dsh-sidebar-lite`](https://github.com/topics/dsh-sidebar-lite) �
 
 ## 🆕 最近更新
 
-**支持的 DSH 版本**：<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.1.0-rc.8 · 0.1.1-rc.1 · 0.1.1-rc.2" src="https://img.shields.io/badge/DSH-0.1.0--rc.8_%C2%B7_0.1.1--rc.1_%C2%B7_0.1.1--rc.2-4d6bfe" /></a> · 完整发布历史见 [Releases](https://github.com/omdsh-dev/dsh-sidebar-lite/releases)
+**支持的 DSH 版本**：<a href="https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions"><img alt="支持的 DSH 版本：0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4d6bfe" /></a> · 完整发布历史见 [Releases](https://github.com/omdsh-dev/dsh-sidebar-lite/releases)
 
 ### v0.16.1
 

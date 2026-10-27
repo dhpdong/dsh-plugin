@@ -9,11 +9,18 @@
  * PowerShell's Microsoft.VisualBasic FileIO SendToRecycleBin; other
  * platforms fall back to a plain recursive remove.
  */
-import { stat, rm } from 'node:fs/promises'
+import { readdir, stat, rm } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 
 export const name = 'dsh-session-manager'
+
+/** The DSH home: `$DSH_HOME` or `~/.dsh` (same precedence as dsh-home-paths). */
+function dshHome() {
+  const configured = process.env.DSH_HOME
+  return configured !== undefined && configured.trim() !== '' ? configured.trim() : join(homedir(), '.dsh')
+}
 
 /** Services required before mounting: the webserver routes and the
  *  session-persistence enumeration. workspaceRegistry is optional (accessed
@@ -44,6 +51,36 @@ export function apply(ctx) {
   function ensureAbsolute(raw) {
     if (!isAbsolute(raw)) throw Object.assign(new Error(`"${raw}" is not absolute`), { status: 400 })
     return resolve(raw)
+  }
+
+  /**
+   * Resolve one session's artifact directory under the persistence root.
+   * DSH 0.2 removed the backend's public `locate()` (and detached
+   * `inspect()`), so the plugin finds the session by its directory name. The
+   * current backend groups sessions as `<root>/<project-key>/<session-id>/`;
+   * session ids are filesystem-safe (`session-<uuid>`), so a one-level scan
+   * of the project directories is enough and avoids re-implementing the
+   * backend's project-key encoding. The configured root is read from the
+   * backend instance (present on the JSONL implementation) and falls back
+   * to `$DSH_HOME/sessions`.
+   */
+  async function sessionDirOf(sessionId) {
+    const root = typeof ctx.sessionPersistence.root === 'string' && ctx.sessionPersistence.root !== ''
+      ? ctx.sessionPersistence.root
+      : join(dshHome(), 'sessions')
+    const candidates = [join(root, sessionId)]
+    let projects = []
+    try { projects = await readdir(root, { withFileTypes: true }) } catch { projects = [] }
+    for (const entry of projects) {
+      if (!entry.isDirectory() || entry.name === sessionId) continue
+      candidates.push(join(root, entry.name, sessionId))
+    }
+    for (const candidate of candidates) {
+      try {
+        if ((await stat(candidate)).isDirectory()) return candidate
+      } catch { /* try the next project directory */ }
+    }
+    throw Object.assign(new Error(`session "${sessionId}" has no artifact directory under ${root}`), { status: 404 })
   }
 
   /** Run one PowerShell command; resolves with combined stderr on failure. */
@@ -105,15 +142,23 @@ export function apply(ctx) {
         // ── list ──────────────────────────────────────────────────────
         if (body.action === 'list') {
           try {
-            const headers = await ctx.sessionPersistence.list()
+            // 0.2 `list()` returns snapshots: { header, revision, ... }. The
+            // header carries identity/cwd/lineage; the display title folds
+            // from the event log (and is read here only for live sessions,
+            // where the title service already holds it).
+            const snapshots = await ctx.sessionPersistence.list()
+            const titleService = typeof ctx.get === 'function' ? ctx.get('sessionTitle') : undefined
+            const liveStore = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
             const sessions = []
-            for (const meta of headers) {
-              try {
-                const loc = ctx.sessionPersistence.locate?.(meta)
-                if (loc !== undefined) {
-                  sessions.push({ id: meta.id, path: dirname(loc.path), title: meta.title, cwd: meta.cwd })
-                }
-              } catch { /* skip unresolvable */ }
+            for (const snapshot of snapshots) {
+              const header = snapshot.header
+              if (header === undefined) continue
+              const live = liveStore?.get?.(header.id)
+              let title
+              if (live !== undefined) {
+                try { title = titleService?.get?.(live)?.title } catch { /* no title yet */ }
+              }
+              sessions.push({ id: header.id, title: title ?? header.id, cwd: header.cwd })
             }
             writeJson(res, 200, { ok: true, value: sessions })
           } catch (e) {
@@ -129,29 +174,37 @@ export function apply(ctx) {
             writeJson(res, 400, { ok: false, error: { code: 'bad-request', message: 'sessionId required' } })
             return
           }
+          // A live session still owns its write lease; removing the directory
+          // under it would corrupt the running agent's next flush.
+          const liveStore = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
+          if (liveStore?.get?.(sessionId) !== undefined) {
+            writeJson(res, 409, { ok: false, error: { code: 'running', message: `session "${sessionId}" is still running` } })
+            return
+          }
           // Best-effort archive from workspace registry (optional service:
           // ctx.get returns undefined when absent, never throws).
           try {
-            const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : undefined
-            await registry?.archiveSession?.(sessionId)
-          } catch { /* ignore */ }
+            // 0.2 replaced workspaceRegistry.archiveSession() with the
+            // workspaceController Remote owner; archive hides the row from
+            // workspace surfaces before the artifact directory goes away.
+            const controller = typeof ctx.get === 'function' ? ctx.get('workspaceController') : undefined
+            await controller?.archiveSession?.({ sessionId })
+          } catch { /* best effort */ }
 
-          let headers
-          try { headers = await ctx.sessionPersistence.list() }
+          let snapshots
+          try { snapshots = await ctx.sessionPersistence.list() }
           catch (e) { writeJson(res, 500, { ok: false, error: { code: 'internal', message: e.message } }); return }
 
-          const meta = headers.find(h => h.id === sessionId)
-          if (meta === undefined) {
+          const snapshot = snapshots.find(s => s.header?.id === sessionId)
+          if (snapshot === undefined) {
             writeJson(res, 404, { ok: false, error: { code: 'not-found', message: `session "${sessionId}" not found` } })
             return
           }
           let sessionDir
           try {
-            const loc = ctx.sessionPersistence.locate?.(meta)
-            if (loc === undefined) throw new Error('session has no file on disk')
-            sessionDir = dirname(loc.path)
+            sessionDir = await sessionDirOf(sessionId)
           } catch (e) {
-            writeJson(res, 400, { ok: false, error: { code: 'fs-error', message: e.message } })
+            writeJson(res, e.status ?? 400, { ok: false, error: { code: 'fs-error', message: e.message } })
             return
           }
           try {

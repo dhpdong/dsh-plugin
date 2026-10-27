@@ -6,9 +6,9 @@
  * deliverables entry; when nothing was produced the selector returns null
  * and the original row renders unchanged.
  */
-import { IconCodeOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCodeOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context } from '../context-types.ts'
-import { firstLeaf, revealPaths, togglePanel, type SidebarStore } from './state.ts'
+import { currentSessionIdOf, firstLeaf, revealPaths, togglePanel, type SidebarStore } from './state.ts'
 import { t } from './locales.ts'
 import { resolveSidebarPath, selectProducedFiles } from './produced-files.ts'
 import { wrapOpenPath } from './openpath-intercept.ts'
@@ -93,7 +93,7 @@ export function SidebarProducedFiles(props: {
             title={path}
             onClick={() => { openInSidebar(path) }}
           >
-            <IconCodeOutline16 size={12} />
+            <IconCodeOutlineRegular size={12} />
             <span>{name}</span>
           </button>
         )
@@ -161,11 +161,13 @@ export function registerTurnTailInterception(ctx: Context, store: SidebarStore):
  * disposer restoring the original (HMR-safe).
  */
 export function registerOpenPathInterception(ctx: Context, store: SidebarStore): () => void {
+  // DSH 0.2 removed the shared client `workspaces.openPath` funnel.
+  if (typeof (ctx.workspaces as { openPath?: unknown } | undefined)?.openPath !== 'function') return () => {}
   return wrapOpenPath(ctx.workspaces, {
     takeoverEnabled: () => !store.getSuspended()
       && store.getPrefs().interceptOpenPath !== false
       && store.getPrefs().tabsEnabled['editor'] !== false,
-    currentSessionId: () => ctx.sessions.list.getSnapshot().current,
+    currentSessionId: () => currentSessionIdOf(ctx.sessions.list.getSnapshot()),
     openInSidebar: (path, sessionId) => { openSidebarFile(ctx, store, sessionId, path) },
     revealInExplorer: (_path, sessionId) => { revealInExplorer(ctx, store, sessionId, lastProduced) },
   })

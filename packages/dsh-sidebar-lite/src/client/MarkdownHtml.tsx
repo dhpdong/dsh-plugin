@@ -193,7 +193,7 @@ function MarkdownSegment({ text, hasMermaid, media, codeLabels }: MarkdownSegmen
     <div ref={containerRef}>
       {hasMermaid
         ? <LazyMermaidMarkdown text={text} codeLabels={codeLabels} />
-        : <MarkdownText text={text} codeLabels={codeLabels} />}
+        : <MarkdownText text={text} labels={{ code: codeLabels, footnotes: 'Footnotes' }} />}
     </div>
   )
 }

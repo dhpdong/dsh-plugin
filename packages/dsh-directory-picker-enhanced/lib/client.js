@@ -7,7 +7,6 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
-		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
 		//#region ../../../node_modules/.pnpm/clsx@2.1.1/node_modules/clsx/dist/clsx.mjs
 		function r(e) {
 			var t, f, n = "";
@@ -112,7 +111,7 @@ window.__ModuleLoader__.load({
 		*/
 		/** Failure text: the Host business message when typed, else the throw's text. */
 		function failureText(error) {
-			if (error instanceof _deepseek_ai_dsh_client_runtime_client.DirectoryBrowseError) return error.rpcError.message;
+			if (error !== null && typeof error === "object" && error.rpcError !== undefined && typeof error.rpcError.message === "string") return error.rpcError.message;
 			return error instanceof Error ? error.message : String(error);
 		}
 		/**
@@ -259,10 +258,10 @@ window.__ModuleLoader__.load({
 								onPick(entry);
 							},
 							children: [
-								selected ? (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, {
+								selected ? (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenRegular, {
 									size: 16,
 									className: DirectoryBrowser_module_css_default.rowIconSelected
-								}) : (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderClose16, {
+								}) : (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderCloseRegular, {
 									size: 16,
 									className: DirectoryBrowser_module_css_default.rowIcon
 								}),
@@ -270,7 +269,7 @@ window.__ModuleLoader__.load({
 									className: DirectoryBrowser_module_css_default.rowName,
 									children: entry.name
 								}),
-								(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutline14, {
+								(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, {
 									size: 12,
 									className: DirectoryBrowser_module_css_default.rowChevron
 								})
@@ -749,7 +748,7 @@ window.__ModuleLoader__.load({
 									ref: crumbTrailRef,
 									children: crumbs.map((crumb, index) => (0, react_jsx_runtime.jsxs)("span", {
 										className: DirectoryBrowser_module_css_default.crumbSeat,
-										children: [index > 0 && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutline14, {
+										children: [index > 0 && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, {
 											size: 12,
 											className: DirectoryBrowser_module_css_default.crumbChevron
 										}), (0, react_jsx_runtime.jsx)("button", {
@@ -781,7 +780,7 @@ window.__ModuleLoader__.load({
 										const sep = separatorOf(parent);
 										setPathDraft(base.endsWith(sep) ? base : `${base}${sep}`);
 									},
-									children: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconEditOutline16, {
+									children: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, {
 										size: 14,
 										className: DirectoryBrowser_module_css_default.crumbEditGlyph
 									})
@@ -908,7 +907,7 @@ window.__ModuleLoader__.load({
 								}),
 								(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 									variant: "outline",
-									icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutline16, { size: 14 }),
+									icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 14 }),
 									disabled: parent === null || loading || parentInert || draftPending,
 									onClick: () => {
 										setFolderDraft("");
@@ -927,7 +926,7 @@ window.__ModuleLoader__.load({
 									onClick: () => {
 										setShowHidden((prev) => !prev);
 									},
-									children: [t("browser.showHidden"), showHidden && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutline16, { size: 14 })]
+									children: [t("browser.showHidden"), showHidden && (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 14 })]
 								}),
 								(0, react_jsx_runtime.jsx)("span", { className: DirectoryBrowser_module_css_default.footerGap }),
 								(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -1051,7 +1050,7 @@ window.__ModuleLoader__.load({
 		/** Required services (cordis fiber inject): the slot registry, the wire-facing workspace service, and locale. */
 		const inject = [
 			"slots",
-			"workspaces",
+			"uiWorkspace",
 			"locale"
 		];
 		/**
@@ -1109,8 +1108,8 @@ window.__ModuleLoader__.load({
 				};
 			}, "directory-picker-browse: dialog dictionaries");
 			const injected = () => ({
-				listDirectory: (path, signal) => ctx.workspaces.listDirectory(path, signal),
-				createDirectory: (path, name) => ctx.workspaces.createDirectory(path, name),
+				listDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
+				createDirectory: (path, name) => ctx.uiWorkspace.createDirectory(path, name),
 				t: ctx.locale.bind(LOCALE_NS)
 			});
 			ctx.slots.inject("conversation.hero.workspace.directoryFlow", () => ctx.slots.inject("sidebar.workspaces.directoryFlow", function* () {
