@@ -97,6 +97,17 @@ cd /path/to/dsh-plugin && dsh web --no-open
 
 `lib/` 已随仓库分发，无需构建；修改源码后 `cd packages/dsh-sidebar-lite && pnpm install && pnpm build`，再把 `lib/` 同步到 profile 的安装副本。文件树的右键/拖拽操作需要同时安装 `dsh-native-file-ops`。
 
+**全局文件浏览器开关**：`dsh-native-file-ops` 把原生 Files 页签接管成「任意根目录」的浏览器，需要宿主的 `/sidebar/api/fs.*` 接受工作区之外的绝对路径：
+
+```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
+- id: sidebar-lite
+  config:
+    allowOutsideWorkspace: true   # 默认 false：保持会话工作区围栏
+```
+
+打开后 `fs.tree / fs.read / fs.write / fs.create / fs.rename / fs.move / fs.trash / fs.manifest`、`/sidebar/file` 媒体与上传路由、以及终端 WebSocket 的 `cwd` 都以客户端给的绝对路径为准；终端因此可以跟随文件浏览器的根目录启动。风险由使用者承担——这是本机开发场景下的显式选择。
+
 ### 上游 npm 安装（原版，不适用于本 fork）
 
 ```sh

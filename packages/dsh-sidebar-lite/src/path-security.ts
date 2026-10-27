@@ -4,6 +4,26 @@ import { basename, dirname, join } from 'node:path'
 import { isWithin, requireAbsolute } from './fs-tree.ts'
 import { SidebarError } from './wire.ts'
 
+/**
+ * When true the workspace fence is lifted: every fs route accepts absolute
+ * paths outside the session workspace, so the file panel can browse an
+ * arbitrary directory (the "global file browser" mode backed by
+ * `dsh-native-file-ops`). Set once by the host half from
+ * `config.allowOutsideWorkspace`; defaults to false, which keeps every route
+ * workspace-confined exactly as before.
+ */
+let outsideWorkspaceAllowed = false
+
+/** Turn the workspace fence on or off (host bootstrap reads the config). */
+export function setOutsideWorkspaceAllowed(value: boolean): void {
+  outsideWorkspaceAllowed = value
+}
+
+/** Whether absolute paths outside the session workspace are accepted. */
+export function isOutsideWorkspaceAllowed(): boolean {
+  return outsideWorkspaceAllowed
+}
+
 /** Resolve a path and convert filesystem resolution failures to an API error. */
 async function resolveRealPath(path: string, label: string): Promise<string> {
   try {
@@ -29,6 +49,9 @@ function assertWithinWorkspace(workspace: string, target: string): void {
  */
 export async function ensureWorkspacePath(cwd: string, target: string): Promise<string> {
   const absolute = requireAbsolute(target)
+  // Global file-browser mode: an absolute path is already the operand the
+  // caller asked for, so only canonicalize it (no containment check).
+  if (outsideWorkspaceAllowed) return resolveRealPath(absolute, 'target')
   const [realCwd, realTarget] = await Promise.all([
     resolveRealPath(cwd, 'workspace'),
     resolveRealPath(absolute, 'target'),
@@ -50,6 +73,9 @@ export async function ensureWorkspacePath(cwd: string, target: string): Promise<
  */
 export async function ensureWorkspaceWritePath(cwd: string, target: string): Promise<string> {
   const absolute = requireAbsolute(target)
+  // Global file-browser mode: the destination may live anywhere; missing
+  // segments are created by the caller, so the absolute path is returned.
+  if (outsideWorkspaceAllowed) return absolute
   const realCwd = await resolveRealPath(cwd, 'workspace')
   let existingPath = absolute
   const missingSegments: string[] = []

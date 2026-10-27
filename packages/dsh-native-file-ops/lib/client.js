@@ -60,6 +60,31 @@ window.__ModuleLoader__.load({
 .nfo-inplace-bar button:disabled{opacity:.5;cursor:default}
 .nfo-inplace-mount{display:flex;flex-direction:column;height:100%;min-height:0}
 .nfo-inplace-text{box-sizing:border-box;flex:1 1 auto;min-height:0;width:100%;padding:10px 14px;border:0;outline:none;resize:none;background:transparent;color:var(--dsw-alias-label-primary,#eee);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
+.nfo-x-host{display:flex;flex-direction:column;height:100%;min-height:0}
+.nfo-x{display:flex;flex-direction:column;height:100%;min-height:0;font:13px/1.5 system-ui,sans-serif;color:var(--dsw-alias-label-primary,#eee)}
+.nfo-x-head{display:flex;align-items:center;gap:2px;padding:5px 6px;border-bottom:1px solid var(--dsw-alias-border-l3,#2a2a30);flex:0 0 auto;min-width:0}
+.nfo-x-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;margin:0 4px;color:var(--dsw-alias-label-secondary,#aaa);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.nfo-x-btn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);cursor:pointer;flex:none}
+.nfo-x-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#eee)}
+.nfo-x-btn:disabled{opacity:.35;cursor:default;background:transparent}
+.nfo-x-svg{display:inline-flex;align-items:center;justify-content:center}
+.nfo-x-body{flex:1 1 auto;min-height:0;overflow:auto;padding:4px 0 12px}
+.nfo-x-row{display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;cursor:pointer;user-select:none;white-space:nowrap;color:var(--dsw-alias-label-primary,#eee)}
+.nfo-x-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08))}
+.nfo-x-chev{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:none;color:var(--dsw-alias-label-tertiary,#888);transition:transform .12s}
+.nfo-x-chev[data-open]{transform:rotate(90deg)}
+.nfo-x-ico{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none;color:var(--dsw-alias-label-secondary,#aaa)}
+.nfo-x-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.nfo-x-hidden .nfo-x-name{opacity:.55}
+.nfo-x-note{padding:5px 14px;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.nfo-picker{display:flex;flex-direction:column;width:min(520px,92vw);height:min(66vh,580px);gap:8px}
+.nfo-picker-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;padding:6px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#1e1e24);color:var(--dsw-alias-label-secondary,#aaa);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.nfo-picker-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:1px;padding:2px}
+.nfo-picker-row{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden}
+.nfo-picker-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08))}
+.nfo-picker-row span:last-child{overflow:hidden;text-overflow:ellipsis}
+.nfo-picker-follow{margin-right:auto;border:0;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);font:12px/1 system-ui,sans-serif;cursor:pointer;padding:0 4px}
+.nfo-picker-follow:hover{color:var(--dsw-alias-label-primary,#eee);text-decoration:underline}
 `
     var locale = 'en'
     var isZh = function () { return String(locale).toLowerCase().indexOf('zh') === 0 }
@@ -130,6 +155,10 @@ window.__ModuleLoader__.load({
     }
 
     function refreshTree() {
+      if (explorer !== null) {
+        window.setTimeout(function () { if (explorer !== null) explorer.reload() }, 80)
+        return
+      }
       window.setTimeout(function () {
         var button = document.querySelector('[data-files-reload]')
         if (button && typeof button.click === 'function') button.click()
@@ -177,8 +206,10 @@ window.__ModuleLoader__.load({
         menu.appendChild(menuItem(L('移动到回收站', 'Move to trash'), function () { trashPath(path) }, true))
         menu.appendChild(document.createElement('hr'))
         var absPath = path.charAt(0) === '/' ? path : cwd.replace(/[\\/]+$/, '') + '/' + path
-        var root = (cwd || '').replace(/[\\/]+$/, '')
-        var relPath = root !== '' && absPath.indexOf(root + '/') === 0 ? absPath.slice(root.length + 1) : absPath
+        var root = (browserRoot() || cwd || '').replace(/[\\/]+$/, '')
+        var relPath = absPath
+        if (root === '/') relPath = absPath.replace(/^\/+/, '')
+        else if (root !== '' && absPath.indexOf(root + '/') === 0) relPath = absPath.slice(root.length + 1)
         menu.appendChild(menuItem(L('复制相对地址', 'Copy relative path'), function () { copyText(relPath) }))
         menu.appendChild(menuItem(L('复制绝对地址', 'Copy absolute path'), function () { copyText(absPath) }))
       }
@@ -245,12 +276,13 @@ window.__ModuleLoader__.load({
     }
 
     function openCreate(kind, dir) {
+      var targetDir = typeof dir === 'string' && dir !== '' ? dir : browserRoot()
       dialog(
         kind === 'folder' ? L('新建文件夹', 'New folder') : L('新建文件', 'New file'),
         '',
         kind === 'folder' ? L('文件夹名称', 'Folder name') : L('文件名', 'File name'),
         function (name) {
-          return sidebarCall(currentCtx, 'fs.create', { dir: dir, name: name, kind: kind === 'folder' ? 'directory' : 'file' }).then(function () {
+          return sidebarCall(currentCtx, 'fs.create', { dir: targetDir, name: name, kind: kind === 'folder' ? 'directory' : 'file' }).then(function () {
             toast(L('已创建', 'Created'))
             refreshTree()
           })
@@ -809,6 +841,449 @@ window.__ModuleLoader__.load({
       }, 60)
     }
 
+    // ── Global file browser: one root, shared by every workspace ─────────
+    // The native file tab lists the CURRENT session workspace, so switching
+    // workspace switches the explorer. This plugin takes that tab type over
+    // and lists one remembered directory instead: every session shows the
+    // same folder, and "open folder" can point it anywhere on the host (the
+    // host's fs routes run with the workspace fence lifted by
+    // `config.allowOutsideWorkspace`).
+    var ROOT_KEY = 'dsh.files.root'
+    var explorer = null
+
+    function readRoot() {
+      try {
+        var value = window.localStorage.getItem(ROOT_KEY)
+        return typeof value === 'string' && value.charAt(0) === '/' ? value : undefined
+      } catch (error) { return undefined }
+    }
+
+    function writeRoot(path) {
+      try {
+        if (typeof path === 'string' && path !== '') window.localStorage.setItem(ROOT_KEY, path)
+        else window.localStorage.removeItem(ROOT_KEY)
+      } catch (error) { /* storage disabled: the session cwd is the fallback */ }
+    }
+
+    /** The active browser root: the remembered folder, else the session cwd. */
+    function browserRoot() {
+      var stored = readRoot()
+      if (stored !== undefined) return stored
+      var state = ctxState(currentCtx)
+      return state !== undefined && typeof state.cwd === 'string' ? state.cwd : ''
+    }
+
+    function parentOfPath(path) {
+      var clean = String(path).replace(/[\\/]+$/, '')
+      var cut = clean.lastIndexOf('/')
+      if (cut < 0) return ''
+      if (cut === 0) return '/'
+      return clean.slice(0, cut)
+    }
+
+    var ICON_FOLDER = 'M2 4.4a1 1 0 0 1 1-1h3.3l1.3 1.5h5.4a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z'
+    var ICON_FILE = 'M4.2 2h4.9l2.7 2.7V14H4.2zM9 2v3h3'
+    var ICON_CHEVRON = 'M6.2 3.6 10.6 8l-4.4 4.4'
+    var ICON_UP = 'M8 12.6V3.8M4.2 7.2 8 3.4l3.8 3.8'
+    var ICON_RELOAD = 'M13.2 8a5.2 5.2 0 1 1-1.6-3.8M13.2 2.6v2.8h-2.8'
+    var ICON_FOLDER_OPEN = 'M2 12.4V4.4a1 1 0 0 1 1-1h3.3l1.3 1.5h5.4a1 1 0 0 1 1 1v1.2M2 12.4 3.9 7h11.3l-2 5.4z'
+
+    function svgIcon(pathData) {
+      var span = document.createElement('span')
+      span.className = 'nfo-x-svg'
+      span.innerHTML = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+        + 'stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="' + pathData + '"/></svg>'
+      return span
+    }
+
+    function toolButton(label, markup, onClick) {
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'nfo-x-btn'
+      button.title = label
+      button.setAttribute('aria-label', label)
+      button.appendChild(svgIcon(markup))
+      button.addEventListener('click', function (event) {
+        event.stopPropagation()
+        onClick()
+      })
+      return button
+    }
+
+    /** Open one file in the right Sidebar through the resource protocol. */
+    function openPathInSidebar(ctx, path) {
+      var state = ctxState(ctx)
+      if (state === undefined) { toast(L('没有活动会话', 'no active session')); return }
+      var normalized = String(path).replace(/\\/g, '/')
+      var address = 'dsh-resource://file/session/' + encodeURIComponent(state.sessionId) + '/'
+        + normalized.split('/').map(encodeURIComponent).join('/')
+      var sidebarRight = typeof ctx.get === 'function' ? ctx.get('sidebarRight') : ctx.sidebarRight
+      if (sidebarRight && typeof sidebarRight.openResource === 'function') {
+        try { sidebarRight.openResource(address); return } catch (error) { /* fall through */ }
+      }
+      toast(L('无法打开文件', 'Cannot open the file'))
+    }
+
+    /** The in-app folder chooser used by "open folder" (any host directory). */
+    function openRootPicker(ctx, onPick) {
+      var start = browserRoot()
+      var here = start !== '' ? start : '/'
+      var overlay = document.createElement('div')
+      overlay.className = 'nfo-overlay'
+      var box = document.createElement('div')
+      box.className = 'nfo-dialog nfo-picker'
+      var heading = document.createElement('h3')
+      heading.textContent = L('打开文件夹', 'Open folder')
+      var pathLine = document.createElement('div')
+      pathLine.className = 'nfo-picker-path'
+      var list = document.createElement('div')
+      list.className = 'nfo-picker-list'
+      var actions = document.createElement('div')
+      actions.className = 'nfo-actions'
+      var follow = document.createElement('button')
+      follow.type = 'button'
+      follow.className = 'nfo-picker-follow'
+      follow.textContent = L('跟随工作区', 'Follow the workspace')
+      var cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.textContent = L('取消', 'Cancel')
+      var confirm = document.createElement('button')
+      confirm.type = 'button'
+      confirm.className = 'nfo-primary'
+      confirm.textContent = L('打开此文件夹', 'Open this folder')
+
+      var close = function () { overlay.remove() }
+      var go = function (path) {
+        here = path
+        pathLine.textContent = path
+        pathLine.title = path
+        list.textContent = ''
+        var loading = document.createElement('div')
+        loading.className = 'nfo-x-note'
+        loading.textContent = L('正在加载…', 'Loading…')
+        list.appendChild(loading)
+        sidebarCall(ctx, 'fs.tree', { path: path }).then(function (listing) {
+          list.textContent = ''
+          var entries = (listing.entries || []).filter(function (entry) { return entry.isDir })
+          var parent = parentOfPath(path)
+          if (parent !== '' && parent !== path) {
+            var upRow = document.createElement('div')
+            upRow.className = 'nfo-picker-row'
+            upRow.appendChild(svgIcon(ICON_UP))
+            var upName = document.createElement('span')
+            upName.textContent = '..'
+            upRow.appendChild(upName)
+            upRow.addEventListener('click', function () { go(parent) })
+            list.appendChild(upRow)
+          }
+          if (entries.length === 0 && list.childNodes.length === 0) {
+            var empty = document.createElement('div')
+            empty.className = 'nfo-x-note'
+            empty.textContent = L('没有子文件夹', 'No subfolders')
+            list.appendChild(empty)
+          }
+          for (var i = 0; i < entries.length; i += 1) {
+            (function (entry) {
+              var row = document.createElement('div')
+              row.className = 'nfo-picker-row'
+              row.appendChild(svgIcon(ICON_FOLDER))
+              var name = document.createElement('span')
+              name.textContent = entry.name
+              row.appendChild(name)
+              row.addEventListener('click', function () { go(entry.path) })
+              list.appendChild(row)
+            })(entries[i])
+          }
+        }, function (error) {
+          list.textContent = ''
+          var failed = document.createElement('div')
+          failed.className = 'nfo-x-note'
+          failed.textContent = String(error && error.message ? error.message : error)
+          list.appendChild(failed)
+        })
+      }
+
+      cancel.addEventListener('click', close)
+      confirm.addEventListener('click', function () { var next = here; close(); onPick(next) })
+      follow.addEventListener('click', function () { close(); onPick('') })
+      actions.appendChild(follow)
+      actions.appendChild(cancel)
+      actions.appendChild(confirm)
+      box.appendChild(heading)
+      box.appendChild(pathLine)
+      box.appendChild(list)
+      box.appendChild(actions)
+      overlay.appendChild(box)
+      overlay.addEventListener('mousedown', function (event) { if (event.target === overlay) close() })
+      document.body.appendChild(overlay)
+      go(here)
+    }
+
+    /**
+     * One explorer instance over `browserRoot()`: a lazily loaded tree, the
+     * path header, and the "open folder" entry point. Rows carry the same
+     * `data-files-path` / `data-files-entry` attributes the native tree used,
+     * so the shared context menu, drag-and-drop and download code keep
+     * working unchanged.
+     */
+    function createExplorer(host, ctx) {
+      var root = browserRoot()
+      var cache = {}
+      var loading = {}
+      var expanded = {}
+      var disposed = false
+
+      var wrap = document.createElement('div')
+      wrap.className = 'nfo-x'
+      var head = document.createElement('div')
+      head.className = 'nfo-x-head'
+      var upButton = toolButton(L('上级文件夹', 'Parent folder'), ICON_UP, function () {
+        var next = parentOfPath(root)
+        if (next !== '' && next !== root) setRoot(next)
+      })
+      var reloadButton = toolButton(L('刷新', 'Refresh'), ICON_RELOAD, function () { reload() })
+      var pathLabel = document.createElement('span')
+      pathLabel.className = 'nfo-x-path'
+      var openButton = toolButton(L('打开文件夹', 'Open folder'), ICON_FOLDER_OPEN, function () {
+        openRootPicker(ctx, function (next) { if (next === '') resetRoot(); else setRoot(next) })
+      })
+      head.appendChild(upButton)
+      head.appendChild(reloadButton)
+      head.appendChild(pathLabel)
+      head.appendChild(openButton)
+      var body = document.createElement('div')
+      body.className = 'nfo-x-body'
+      body.setAttribute('data-files-body', '')
+      body.setAttribute('data-files-state', 'tree')
+      wrap.appendChild(head)
+      wrap.appendChild(body)
+      host.appendChild(wrap)
+
+      function note(text) {
+        var node = document.createElement('div')
+        node.className = 'nfo-x-note'
+        node.textContent = text
+        return node
+      }
+
+      function load(path) {
+        if (disposed || loading[path] === true) return
+        loading[path] = true
+        sidebarCall(ctx, 'fs.tree', { path: path }).then(function (listing) {
+          delete loading[path]
+          cache[path] = { entries: listing.entries || [] }
+          render()
+        }, function (error) {
+          delete loading[path]
+          cache[path] = { error: String(error && error.message ? error.message : error) }
+          render()
+        })
+      }
+
+      function level(dirPath, depth) {
+        var frag = document.createDocumentFragment()
+        var listing = cache[dirPath]
+        if (listing === undefined || listing.entries === undefined) return frag
+        for (var i = 0; i < listing.entries.length; i += 1) {
+          var entry = listing.entries[i]
+          frag.appendChild(row(entry, depth))
+          if (entry.isDir && expanded[entry.path] === true) {
+            if (cache[entry.path] === undefined) {
+              load(entry.path)
+              frag.appendChild(note(L('正在加载…', 'Loading…')))
+            } else if (cache[entry.path].error !== undefined) {
+              frag.appendChild(note(cache[entry.path].error))
+            } else {
+              frag.appendChild(level(entry.path, depth + 1))
+            }
+          }
+        }
+        return frag
+      }
+
+      function row(entry, depth) {
+        var node = document.createElement('div')
+        node.className = 'nfo-x-row'
+        node.setAttribute('data-files-path', entry.path)
+        node.setAttribute('data-files-entry', entry.isDir ? 'directory' : 'file')
+        node.setAttribute('draggable', 'true')
+        node.style.paddingLeft = (6 + depth * 14) + 'px'
+        if (entry.hidden === true) node.className += ' nfo-x-hidden'
+        var chev = document.createElement('span')
+        chev.className = 'nfo-x-chev'
+        if (entry.isDir) {
+          chev.appendChild(svgIcon(ICON_CHEVRON))
+          if (expanded[entry.path] === true) chev.setAttribute('data-open', '')
+        }
+        node.appendChild(chev)
+        var ico = document.createElement('span')
+        ico.className = 'nfo-x-ico'
+        ico.appendChild(svgIcon(entry.isDir ? ICON_FOLDER : ICON_FILE))
+        node.appendChild(ico)
+        var name = document.createElement('span')
+        name.className = 'nfo-x-name'
+        name.textContent = entry.name
+        name.title = entry.name
+        node.appendChild(name)
+        node.addEventListener('click', function () {
+          if (entry.isDir) {
+            if (expanded[entry.path] === true) delete expanded[entry.path]
+            else expanded[entry.path] = true
+            render()
+            return
+          }
+          openPathInSidebar(ctx, entry.path)
+        })
+        return node
+      }
+
+      function render() {
+        if (disposed) return
+        pathLabel.textContent = root
+        pathLabel.title = root
+        var parent = parentOfPath(root)
+        upButton.disabled = parent === '' || parent === root
+        body.textContent = ''
+        var listing = cache[root]
+        if (listing === undefined) {
+          body.appendChild(note(L('正在加载…', 'Loading…')))
+          load(root)
+          return
+        }
+        if (listing.error !== undefined) {
+          body.appendChild(note(listing.error))
+          return
+        }
+        if (listing.entries.length === 0) {
+          body.appendChild(note(L('此文件夹为空', 'This folder is empty')))
+          return
+        }
+        body.appendChild(level(root, 0))
+      }
+
+      function setRoot(next) {
+        root = next
+        writeRoot(next)
+        cache = {}
+        loading = {}
+        expanded = {}
+        render()
+      }
+
+      function resetRoot() {
+        writeRoot('')
+        var state = ctxState(ctx)
+        setRoot(state !== undefined && typeof state.cwd === 'string' ? state.cwd : '/')
+      }
+
+      function reload() {
+        cache = {}
+        loading = {}
+        render()
+      }
+
+      render()
+
+      return {
+        reload: reload,
+        dispose: function () {
+          disposed = true
+          wrap.remove()
+        },
+      }
+    }
+
+    var FILES_TAKEOVER_ID = 'dsh-native-file-ops/files-global'
+
+    function GlobalFilesBody(props) {
+      var hostRef = React.useRef(null)
+      React.useEffect(function () {
+        var node = hostRef.current
+        if (node === null) return undefined
+        var instance = createExplorer(node, currentCtx)
+        explorer = instance
+        return function () {
+          if (explorer === instance) explorer = null
+          instance.dispose()
+        }
+      }, [])
+      return React.createElement('div', { className: 'nfo-x-host', ref: hostRef })
+    }
+
+    /**
+     * Take the native `files` tab type over. The right Sidebar keeps one
+     * surface per session, so "shared by every workspace" means one SHARED
+     * ROOT: whichever session renders the tab, it lists the same directory.
+     * A registration failure keeps the untouched native tree (the DOM
+     * enhancements above still apply), so this never breaks the sidebar.
+     */
+    function registerGlobalFiles(ctx) {
+      // Dynamic injection: the right Sidebar's registry may be provided after
+      // this plugin activates, and a composition without it must keep working
+      // (the native tree and the DOM enhancements above never depend on it).
+      if (typeof ctx.inject !== 'function') return
+      ctx.inject(['sidebarRightTabs', 'slots'], function (scope) {
+        var registry = scope.sidebarRightTabs
+        if (!registry || typeof registry.register !== 'function') return
+        scope.effect(function () {
+          try {
+            var __reg = registry.register({
+              id: FILES_TAKEOVER_ID,
+              kind: 'files',
+              title: function () { return L('文件', 'Files') },
+              // The guide entry is what "New tab" lists and what seeds the
+              // default page of an empty panel: without it the column opens
+              // blank and the files page cannot be reopened at all.
+              guide: [{
+                id: 'global-files',
+                order: 10,
+                title: function () { return L('文件', 'Files') },
+                description: function () { return L('浏览任意文件夹（所有工作区共用）', 'Browse any folder (shared by every workspace)') },
+              }],
+            })
+            return __reg
+          } catch (error) {
+            return undefined
+          }
+        }, 'dsh-native-file-ops: global files type')
+        scope.effect(function () {
+          return scope.slots.inject('sidebar.right.pane.tab', function () {
+            return scope.slots.register({ name: 'sidebar.right.pane.tab', key: FILES_TAKEOVER_ID }, GlobalFilesBody)
+          })
+        }, 'dsh-native-file-ops: global files body')
+      })
+    }
+
+    /**
+     * The docked terminal follows the file browser: every terminal spawn
+     * carries the browser root instead of the session cwd, so switching
+     * workspace no longer changes where a new shell starts.
+     */
+    function installTerminalCwd() {
+      var Native = window.WebSocket
+      if (typeof Native !== 'function' || Native.__nfoCwd === true) return
+      var Patched = function (url, protocols) {
+        var next = url
+        try {
+          var root = readRoot()
+          if (root !== undefined && typeof url === 'string' && url.indexOf('/sidebar/ws/terminal') !== -1 && url.indexOf('uuid=') === -1) {
+            var parsed = new URL(url, window.location.href)
+            parsed.searchParams.set('cwd', root)
+            next = parsed.toString()
+          }
+        } catch (error) { /* keep the original url */ }
+        return protocols === undefined ? new Native(next) : new Native(next, protocols)
+      }
+      Patched.prototype = Native.prototype
+      Patched.CONNECTING = 0
+      Patched.OPEN = 1
+      Patched.CLOSING = 2
+      Patched.CLOSED = 3
+      Patched.__nfoCwd = true
+      window.WebSocket = Patched
+    }
+
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
     exports.apply = function (ctx) {
       currentCtx = ctx
@@ -823,6 +1298,8 @@ window.__ModuleLoader__.load({
           }, DocEditAction)
         })
       }, 'dsh-native-file-ops: document edit action')
+      registerGlobalFiles(ctx)
+      installTerminalCwd()
       var style = document.createElement('style')
       style.dataset.plugin = 'dsh-native-file-ops'
       style.textContent = CSS

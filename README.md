@@ -13,7 +13,7 @@ DSH（DeepSeek Harness）Web 插件集——单仓多插件结构，**每个插�
 | [dsh-session-manager](packages/dsh-session-manager) | 会话标题栏 🗑️ 按钮，**彻底删除**不再需要的会话（移入系统回收站） | 零依赖 |
 | [dsh-directory-picker-enhanced](packages/dsh-directory-picker-enhanced) | 「添加工作区」目录选择器增强：**上一级**按钮 + **盘符下拉** | 零依赖 |
 | [dsh-inline-diff](packages/dsh-inline-diff) | Edit / Write 工具 diff 在对话中**常驻展开**（Claude Code 风格） | 零依赖 |
-| [dsh-native-file-ops](packages/dsh-native-file-ops) | **原生右侧栏文件树增强（当前主要文件入口）**：右键新建/重命名/下载/回收站/复制路径 + 拖拽移动 + 文档打开即编辑（CodeMirror 高亮 + MD/HTML 预览 + 自动保存）；依赖 `dsh-sidebar-lite` 的 `/sidebar/api/*` carrier | `trash` |
+| [dsh-native-file-ops](packages/dsh-native-file-ops) | **原生右侧栏文件树增强（当前主要文件入口）**：右键新建/重命名/下载/回收站/复制路径 + 拖拽移动 + 文档打开即编辑（CodeMirror 高亮 + MD/HTML 预览 + 自动保存）；**文件页签已与工作区解绑**：接管成全局文件浏览器，所有工作区共用同一个根目录、可打开任意文件夹，底部终端跟随该根目录启动；依赖 `dsh-sidebar-lite` 的 `/sidebar/api/*` carrier | `trash` |
 
 ## 安装单个插件
 
@@ -70,6 +70,13 @@ cd packages/dsh-sidebar-lite && pnpm install && pnpm build
 - 每个 `packages/<name>` 自带 package.json / cordis.patch.yml / README，互不依赖、可独立卸载（从 profile 的 dependencies 与 bundles 中移除对应条目即可）。
 - 构建产物（lib/）已随目录分发；sidebar-lite 构建后需把 `lib/` 与 `package.json`、`cordis.patch.yml` 同步到 profile 安装副本。
 - 当前 profile 形态：DSH 原生右侧栏（Files / 终端）+ `dsh-native-file-ops` 文件操作；`dsh-sidebar-lite` 只提供宿主 API carrier、底部终端和兼容层，不再显示自己的右侧面板。
+- 全局文件浏览器需要在 profile 的 `cordis.patch.yml` 里给 `sidebar-lite` 打开围栏开关，否则只能浏览当前工作区：
+
+  ```yaml
+  - id: sidebar-lite
+    config:
+      allowOutsideWorkspace: true
+  ```
 
 ## 仓库结构
 

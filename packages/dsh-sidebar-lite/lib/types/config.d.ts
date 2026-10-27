@@ -22,6 +22,13 @@ export interface SidebarConfig {
     /** How long a disconnected terminal process survives awaiting a reconnect. */
     reconnectGraceMs?: number;
     /**
+     * Lift the workspace fence so every fs route accepts absolute paths outside
+     * the session workspace. `dsh-native-file-ops` turns this on for its global
+     * file browser (any folder, shared by every workspace). Default false keeps
+     * every route workspace-confined.
+     */
+    allowOutsideWorkspace?: boolean;
+    /**
      * Terminal shell (absolute path or bare executable name) for BOTH the UI
      * terminal tabs and the model-facing `terminal_*` tools. Empty = auto:
      * POSIX follows `$SHELL` then the account login shell; Windows follows
@@ -48,6 +55,8 @@ export interface ResolvedSidebarConfig {
     listLimit: number;
     terminalsPerSession: number;
     reconnectGraceMs: number;
+    /** Whether fs routes accept absolute paths outside the session workspace. */
+    allowOutsideWorkspace: boolean;
     /** The configured terminal shell; empty means the host auto-resolves it. */
     shell: string;
     /** Explicit shell arguments; empty means use the platform defaults. */

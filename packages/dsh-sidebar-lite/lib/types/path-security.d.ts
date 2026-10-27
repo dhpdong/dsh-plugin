@@ -1,3 +1,7 @@
+/** Turn the workspace fence on or off (host bootstrap reads the config). */
+export declare function setOutsideWorkspaceAllowed(value: boolean): void;
+/** Whether absolute paths outside the session workspace are accepted. */
+export declare function isOutsideWorkspaceAllowed(): boolean;
 /**
  * Resolve an existing workspace path through symlinks and enforce containment.
  *

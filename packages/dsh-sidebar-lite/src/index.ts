@@ -36,7 +36,7 @@ import {
 } from './config.ts'
 import { parentOf, requireAbsolute, listDirectory, rootLabel } from './fs-tree.ts'
 import { createWorkspaceEntry, trashWorkspacePath, writeWorkspaceUpload } from './fs-operations.ts'
-import { ensureWorkspacePath, ensureWorkspaceWritePath } from './path-security.ts'
+import { ensureWorkspacePath, ensureWorkspaceWritePath, setOutsideWorkspaceAllowed } from './path-security.ts'
 import { searchFiles } from './fs-search.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
@@ -865,6 +865,9 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   // restore it before any terminal can spawn (idempotent).
   ensureSpawnHelper()
   const resolved = resolveSidebarConfig(config)
+  // Global file browser: the fence can be lifted for the whole fs surface so
+  // the file panel can browse any directory (see config.allowOutsideWorkspace).
+  setOutsideWorkspaceAllowed(resolved.allowOutsideWorkspace)
   // One shell resolution feeds BOTH terminal surfaces: the UI tabs and the
   // model-facing terminal_* tools. They must stay in lockstep, otherwise a
   // configured shell fixes one surface and silently leaves the other on the
@@ -1014,7 +1017,14 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         if (sessionId === null || dir === null || relativePath === null || relativePath.trim() === '') {
           throw new SidebarError('bad-request', 'sessionId, dir, and relativePath are required')
         }
-        const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+        const clientCwd = url.searchParams.get('cwd') ?? undefined
+    // Global file browser (config.allowOutsideWorkspace): a client-supplied
+    // absolute cwd is the browser root the docked terminal should follow, so
+    // it wins over the session workspace. Fenced mode keeps the authoritative
+    // session cwd and only falls back to the client value while hydrating.
+    const cwd = resolved.allowOutsideWorkspace && clientCwd !== undefined && isAbsolute(clientCwd)
+      ? clientCwd
+      : sessionCwdOf(ctx, sessionId, clientCwd)
         const { path, size } = await writeWorkspaceUpload({
           cwd,
           dir,
@@ -1348,7 +1358,14 @@ async function attachTerminal(
       ws.close(1011, PTY_DEPS_MISSING)
       return
     }
-    const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+    const terminalClientCwd = url.searchParams.get('cwd') ?? undefined
+    // Global file browser (config.allowOutsideWorkspace): a client-supplied
+    // absolute cwd is the browser root the docked terminal follows, so it
+    // wins over the session workspace. Fenced mode keeps the authoritative
+    // session cwd and only falls back to the client value while hydrating.
+    const cwd = resolved.allowOutsideWorkspace && terminalClientCwd !== undefined && isAbsolute(terminalClientCwd)
+      ? terminalClientCwd
+      : sessionCwdOf(ctx, sessionId, terminalClientCwd)
     // Settings-page shell overrides win over the yaml/auto shell for
     // terminals opened from now on (existing pty handles keep their shell).
     const overrides = shellOverridesOf(getSettings)

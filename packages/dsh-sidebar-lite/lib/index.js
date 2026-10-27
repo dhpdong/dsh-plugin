@@ -70,6 +70,7 @@ const Config = z.object({
 	listLimit: z.number().step(1).min(1).default(1e3),
 	terminalsPerSession: z.number().step(1).min(1).default(3),
 	reconnectGraceMs: z.number().step(1).min(0).default(3e4),
+	allowOutsideWorkspace: z.boolean().default(false),
 	shell: z.string().default(""),
 	shellArgs: z.array(z.string()).default([])
 });
@@ -87,6 +88,7 @@ function resolveSidebarConfig(config) {
 		listLimit: config?.listLimit ?? 1e3,
 		terminalsPerSession: config?.terminalsPerSession ?? 3,
 		reconnectGraceMs: config?.reconnectGraceMs ?? 3e4,
+		allowOutsideWorkspace: config?.allowOutsideWorkspace ?? false,
 		shell: config?.shell?.trim() ?? "",
 		shellArgs: config?.shellArgs ?? []
 	};
@@ -323,6 +325,23 @@ function messageOf(error) {
 //#endregion
 //#region src/path-security.ts
 /** Filesystem path guards shared by sidebar APIs that access a session workspace. */
+/**
+* When true the workspace fence is lifted: every fs route accepts absolute
+* paths outside the session workspace, so the file panel can browse an
+* arbitrary directory (the "global file browser" mode backed by
+* `dsh-native-file-ops`). Set once by the host half from
+* `config.allowOutsideWorkspace`; defaults to false, which keeps every route
+* workspace-confined exactly as before.
+*/
+let outsideWorkspaceAllowed = false;
+/** Turn the workspace fence on or off (host bootstrap reads the config). */
+function setOutsideWorkspaceAllowed(value) {
+	outsideWorkspaceAllowed = value;
+}
+/** Whether absolute paths outside the session workspace are accepted. */
+function isOutsideWorkspaceAllowed() {
+	return outsideWorkspaceAllowed;
+}
 /** Resolve a path and convert filesystem resolution failures to an API error. */
 async function resolveRealPath(path, label) {
 	try {
@@ -344,6 +363,7 @@ function assertWithinWorkspace(workspace, target) {
 */
 async function ensureWorkspacePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (outsideWorkspaceAllowed) return resolveRealPath(absolute, "target");
 	const [realCwd, realTarget] = await Promise.all([resolveRealPath(cwd, "workspace"), resolveRealPath(absolute, "target")]);
 	assertWithinWorkspace(realCwd, realTarget);
 	return realTarget;
@@ -361,6 +381,7 @@ async function ensureWorkspacePath(cwd, target) {
 */
 async function ensureWorkspaceWritePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (outsideWorkspaceAllowed) return absolute;
 	const realCwd = await resolveRealPath(cwd, "workspace");
 	let existingPath = absolute;
 	const missingSegments = [];
@@ -435,6 +456,22 @@ async function createWorkspaceEntry(cwd, dir, name, kind) {
 */
 async function trashWorkspacePath(cwd, target) {
 	const absolute = requireAbsolute(target);
+	if (isOutsideWorkspaceAllowed()) {
+		const realParent = await realpath(dirname(absolute)).catch((error) => {
+			throw new SidebarError("fs-error", `cannot resolve target parent "${dirname(absolute)}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		});
+		const safeTarget = join(realParent, basename(absolute));
+		if (dirname(safeTarget) === safeTarget || safeTarget === requireAbsolute(cwd)) throw new SidebarError("forbidden", "refusing to trash a filesystem root", 403);
+		await lstat(safeTarget).catch((error) => {
+			throw new SidebarError("fs-error", `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		});
+		try {
+			await trash(safeTarget, { glob: false });
+		} catch (error) {
+			throw new SidebarError("fs-error", `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400);
+		}
+		return { path: safeTarget };
+	}
 	const root = requireAbsolute(cwd);
 	if (isWithin(root, absolute) && isWithin(absolute, root)) throw new SidebarError("forbidden", "refusing to trash the workspace root", 403);
 	const realCwd = await realpath(cwd).catch((error) => {
@@ -4425,6 +4462,7 @@ async function streamZip(path, res) {
 function apply(ctx, config) {
 	ensureSpawnHelper();
 	const resolved = resolveSidebarConfig(config);
+	setOutsideWorkspaceAllowed(resolved.allowOutsideWorkspace);
 	const terminalShell = defaultShell({ explicit: resolved.shell });
 	const fence = (req) => isTrustedApiRequest(req, trustedHostsOf(ctx));
 	const nodePty = loadNodePty();
@@ -4544,8 +4582,9 @@ function apply(ctx, config) {
 				const dir = url.searchParams.get("dir");
 				const relativePath = url.searchParams.get("relativePath");
 				if (sessionId === null || dir === null || relativePath === null || relativePath.trim() === "") throw new SidebarError("bad-request", "sessionId, dir, and relativePath are required");
+				const clientCwd = url.searchParams.get("cwd") ?? void 0;
 				const { path, size } = await writeWorkspaceUpload({
-					cwd: sessionCwdOf(ctx, sessionId, url.searchParams.get("cwd") ?? void 0),
+					cwd: resolved.allowOutsideWorkspace && clientCwd !== void 0 && isAbsolute(clientCwd) ? clientCwd : sessionCwdOf(ctx, sessionId, clientCwd),
 					dir,
 					relativePath,
 					chunks: req,
@@ -4790,7 +4829,8 @@ async function attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolv
 			ws.close(1011, PTY_DEPS_MISSING);
 			return;
 		}
-		const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get("cwd") ?? void 0);
+		const terminalClientCwd = url.searchParams.get("cwd") ?? void 0;
+		const cwd = resolved.allowOutsideWorkspace && terminalClientCwd !== void 0 && isAbsolute(terminalClientCwd) ? terminalClientCwd : sessionCwdOf(ctx, sessionId, terminalClientCwd);
 		const overrides = shellOverridesOf(getSettings);
 		const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs);
 		if (handle.transcript !== "") ws.send(handle.transcript);
