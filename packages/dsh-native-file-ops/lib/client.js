@@ -875,6 +875,75 @@ window.__ModuleLoader__.load({
       } catch (error) { /* storage disabled: the session cwd is the fallback */ }
     }
 
+    /** The expansion set, remembered across sessions, panes and workspaces. */
+    var EXPANDED_KEY = 'dsh.files.expanded'
+    var SCROLL_KEY = 'dsh.files.scroll'
+
+    function readExpanded() {
+      try {
+        var raw = window.localStorage.getItem(EXPANDED_KEY)
+        if (typeof raw !== 'string' || raw === '') return {}
+        var list = JSON.parse(raw)
+        var map = {}
+        if (!Array.isArray(list)) return map
+        for (var i = 0; i < list.length; i += 1) if (typeof list[i] === 'string') map[list[i]] = true
+        return map
+      } catch (error) { return {} }
+    }
+
+    function writeExpanded(map) {
+      try {
+        var list = []
+        for (var path in map) {
+          if (!Object.prototype.hasOwnProperty.call(map, path) || map[path] !== true) continue
+          list.push(path)
+          if (list.length >= 300) break
+        }
+        window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(list))
+      } catch (error) { /* storage disabled: state stays per mount */ }
+    }
+
+    function readScroll() {
+      try {
+        var raw = window.localStorage.getItem(SCROLL_KEY)
+        var map = typeof raw === 'string' && raw !== '' ? JSON.parse(raw) : {}
+        return map && typeof map === 'object' ? map : {}
+      } catch (error) { return {} }
+    }
+
+    function writeScroll(map) {
+      try { window.localStorage.setItem(SCROLL_KEY, JSON.stringify(map)) } catch (error) { /* ignore */ }
+    }
+
+    /**
+     * Directory listings shared by every explorer instance in this page.
+     * Switching workspace remounts the tab; without this the tree re-fetched
+     * every expanded level, so it looked like a different browser. A short TTL
+     * keeps externally-made changes visible while still making the switch
+     * instant.
+     */
+    var TREE_CACHE = {}
+    var TREE_TTL_MS = 30000
+
+    function cachedListing(path) {
+      var hit = TREE_CACHE[path]
+      if (hit === undefined) return undefined
+      if (Date.now() - hit.at > TREE_TTL_MS) { delete TREE_CACHE[path]; return undefined }
+      return hit.entries
+    }
+
+    function rememberListing(path, entries) {
+      TREE_CACHE[path] = { entries: entries, at: Date.now() }
+    }
+
+    function forgetListing(path) {
+      delete TREE_CACHE[path]
+      for (var key in TREE_CACHE) {
+        if (!Object.prototype.hasOwnProperty.call(TREE_CACHE, key)) continue
+        if (key === path || key.indexOf(path.replace(/[\\/]+$/, '') + '/') === 0) delete TREE_CACHE[key]
+      }
+    }
+
     /** The active browser root: the remembered folder, else the session cwd. */
     function browserRoot() {
       var stored = readRoot()
@@ -1098,7 +1167,8 @@ window.__ModuleLoader__.load({
       var root = browserRoot()
       var cache = {}
       var loading = {}
-      var expanded = {}
+      var expanded = readExpanded()
+      var scrollByRoot = readScroll()
       var disposed = false
 
       var wrap = document.createElement('div')
@@ -1127,6 +1197,16 @@ window.__ModuleLoader__.load({
       wrap.appendChild(body)
       host.appendChild(wrap)
 
+      var scrollTimer = null
+      body.addEventListener('scroll', function () {
+        scrollByRoot[root] = body.scrollTop
+        if (scrollTimer !== null) return
+        scrollTimer = window.setTimeout(function () {
+          scrollTimer = null
+          writeScroll(scrollByRoot)
+        }, 250)
+      })
+
       function note(text) {
         var node = document.createElement('div')
         node.className = 'nfo-x-note'
@@ -1144,6 +1224,12 @@ window.__ModuleLoader__.load({
 
       function load(path) {
         if (disposed || loading[path] === true) return
+        var shared = cachedListing(path)
+        if (shared !== undefined) {
+          cache[path] = { entries: shared }
+          render()
+          return
+        }
         loading[path] = true
         var settled = false
         var timer = window.setTimeout(function () {
@@ -1168,6 +1254,7 @@ window.__ModuleLoader__.load({
           } else {
             delete attempts[path]
             cache[path] = { entries: result.entries || [] }
+            rememberListing(path, cache[path].entries)
           }
           render()
         }
@@ -1229,6 +1316,7 @@ window.__ModuleLoader__.load({
           if (entry.isDir) {
             if (expanded[entry.path] === true) delete expanded[entry.path]
             else expanded[entry.path] = true
+            writeExpanded(expanded)
             render()
             return
           }
@@ -1237,13 +1325,34 @@ window.__ModuleLoader__.load({
         return node
       }
 
+      // Re-entrancy guard: a cached level resolves synchronously inside
+      // level(), and painting from there would append a second tree on top of
+      // the one still being built (duplicate rows). Nested renders only mark
+      // the tree dirty; the outer pass repaints once it finishes.
+      var rendering = false
+      var dirty = false
+
       function render() {
+        if (disposed) return
+        if (rendering) { dirty = true; return }
+        rendering = true
+        try { paint() } finally { rendering = false }
+        if (dirty) { dirty = false; render() }
+      }
+
+      function paint() {
         if (disposed) return
         pathLabel.textContent = root
         pathLabel.title = root
         var parent = parentOfPath(root)
         upButton.disabled = parent === '' || parent === root
         body.textContent = ''
+        // The body is rebuilt from scratch, so the remembered offset is
+        // re-applied on the next frame (after the rows are laid out).
+        var restore = scrollByRoot[root] || 0
+        window.requestAnimationFrame(function () {
+          if (!disposed && body.isConnected && restore > 0) body.scrollTop = restore
+        })
         var listing = cache[root]
         if (listing === undefined) {
           body.appendChild(note(L('正在加载…', 'Loading…')))
@@ -1274,7 +1383,7 @@ window.__ModuleLoader__.load({
         writeRoot(next)
         cache = {}
         loading = {}
-        expanded = {}
+        attempts = {}
         render()
       }
 
@@ -1285,6 +1394,7 @@ window.__ModuleLoader__.load({
       }
 
       function reload() {
+        forgetListing(root)
         cache = {}
         loading = {}
         render()
