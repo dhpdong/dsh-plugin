@@ -750,6 +750,22 @@ window.__ModuleLoader__.load({
       }, PencilGlyph())
     }
 
+    /** Double-click a text preview body to enter the in-place editor: the
+     *  header pencil stays for discoverability, but editing needs no button. */
+    function onPreviewDoubleClick(event) {
+      var target = event.target
+      if (!target || typeof target.closest !== 'function') return
+      if (target.closest('a, button, input, textarea, select') !== null) return
+      var body = target.closest('[data-textpreview-body]')
+      if (body === null) return
+      var host = body.closest('[data-sidebar-right-tab]')
+      if (host === null) return
+      var button = host.querySelector('button.nfo-doc-edit')
+      if (button === null) return
+      event.preventDefault()
+      button.click()
+    }
+
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
     exports.apply = function (ctx) {
       currentCtx = ctx
@@ -777,6 +793,7 @@ window.__ModuleLoader__.load({
       document.addEventListener('dragleave', onDragLeave, true)
       document.addEventListener('drop', onDrop, true)
       document.addEventListener('dragend', onDragEnd, true)
+      document.addEventListener('dblclick', onPreviewDoubleClick, true)
       document.addEventListener('mousedown', function (event) {
         if (event.target.closest && event.target.closest('#dfo-menu') === null) closeMenu()
       }, true)
@@ -792,6 +809,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('dragleave', onDragLeave, true)
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
+          document.removeEventListener('dblclick', onPreviewDoubleClick, true)
           closeMenu()
         }
       })
