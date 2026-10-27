@@ -74,6 +74,15 @@ window.__ModuleLoader__.load({
 .nfo-x-chev{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:none;color:var(--dsw-alias-label-tertiary,#888);transition:transform .12s}
 .nfo-x-chev[data-open]{transform:rotate(90deg)}
 .nfo-x-ico{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none;color:var(--dsw-alias-label-secondary,#aaa)}
+.nfo-x-ico[data-cat="code"]{color:#5e9eff}
+.nfo-x-ico[data-cat="doc"]{color:#b07cf0}
+.nfo-x-ico[data-cat="image"]{color:#3fbf7f}
+.nfo-x-ico[data-cat="media"]{color:#e07bb0}
+.nfo-x-ico[data-cat="archive"]{color:#d9a441}
+.nfo-x-ico[data-cat="exec"]{color:#e5645f}
+.nfo-x-ico[data-cat="config"]{color:#8a94a6}
+.nfo-x-ico[data-cat="model"]{color:#35b8b8}
+.nfo-x-ico[data-cat="data"]{color:#8fae4a}
 .nfo-x-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
 .nfo-x-hidden .nfo-x-name{opacity:.55}
 .nfo-x-note{padding:5px 14px;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
@@ -889,6 +898,63 @@ window.__ModuleLoader__.load({
     var ICON_RELOAD = 'M13.2 8a5.2 5.2 0 1 1-1.6-3.8M13.2 2.6v2.8h-2.8'
     var ICON_FOLDER_OPEN = 'M2 12.4V4.4a1 1 0 0 1 1-1h3.3l1.3 1.5h5.4a1 1 0 0 1 1 1v1.2M2 12.4 3.9 7h11.3l-2 5.4z'
 
+    // ── File-type categories ────────────────────────────────────────────
+    // One glyph per FAMILY instead of per extension: the tree stays readable
+    // without a 40-icon set, and each family keeps a muted accent colour.
+    var ICON_CAT = {
+      code: 'M5.4 4.4 2.2 8l3.2 3.6M10.6 4.4 13.8 8l-3.2 3.6',
+      doc: 'M4 1.8h5l3 3V14H4zM9 1.8v3h3M6 7.2h4M6 9.6h4',
+      image: 'M2.6 3.4h10.8v9.2H2.6zM3 11.6l3.2-3 2.3 1.9 2.2-1.7 2.9 2.6',
+      media: 'M8 2.5a5.5 5.5 0 1 0 .01 0M6.6 5.6 10.4 8l-3.8 2.4z',
+      archive: 'M2.6 5.6h10.8v7.8H2.6zM2.6 5.6 4 2.6h8l1.4 3M8 5.6v2M8 9.2v1.6',
+      exec: 'M2.6 3.4h10.8v9.2H2.6zM5.2 6.6 7.2 8.2 5.2 9.8M8.6 9.9h3',
+      config: 'M3 5.2h3.2M8.4 5.2h4.6M3 10.8h5.4M10.6 10.8h2.4M6.2 3.6v3.2M9.4 9.2v3.2',
+      model: 'M8 1.9 13.6 4.7v6.6L8 14.1 2.4 11.3V4.7zM8 8.1v6M8 8.1 2.4 4.7M8 8.1l5.6-3.4',
+      data: 'M3.4 4.4c0-.9 2-1.6 4.6-1.6s4.6.7 4.6 1.6-2 1.6-4.6 1.6-4.6-.7-4.6-1.6zM3.4 4.4v7.2c0 .9 2 1.6 4.6 1.6s4.6-.7 4.6-1.6V4.4',
+    }
+
+    var CATEGORY_EXTENSIONS = {
+      code: 'js mjs cjs jsx ts tsx vue svelte astro py pyi go rs c h cc cpp cxx hpp hxx java kt kts scala rb php swift m mm lua pl pm sh bash zsh fish ps1 bat cmd sql html htm css scss sass less styl ipynb ml hs clj ex exs erl dart jl r zig nim v sol asm',
+      doc: 'md markdown mdx rst txt log pdf doc docx odt rtf xls xlsx ods csv tsv ppt pptx odp epub tex',
+      image: 'png jpg jpeg gif webp svg bmp ico tif tiff avif heic heif psd xcf',
+      media: 'mp4 mkv avi mov webm m4v flv wmv mp3 wav flac ogg m4a aac opus wma mid midi',
+      archive: 'zip tar gz tgz bz2 xz 7z rar deb rpm whl apk jar iso zst lz4 cab',
+      exec: 'exe msi bin run appimage dll so dylib sys out elf',
+      config: 'json jsonc json5 yaml yml toml ini cfg conf env properties lock plist rc',
+      model: 'pt pth ckpt onnx safetensors gguf ggml h5 tflite engine pb',
+      data: 'db sqlite sqlite3 parquet arrow npy npz pkl pickle feather orc avro',
+    }
+
+    /** Extension → category map, built once (first match wins). */
+    var EXT_TO_CATEGORY = (function () {
+      var map = {}
+      for (var category in CATEGORY_EXTENSIONS) {
+        if (!Object.prototype.hasOwnProperty.call(CATEGORY_EXTENSIONS, category)) continue
+        var list = CATEGORY_EXTENSIONS[category].split(' ')
+        for (var i = 0; i < list.length; i += 1) map[list[i]] = category
+      }
+      return map
+    })()
+
+    /** Well-known extension-less names that still deserve a family glyph. */
+    var NAME_CATEGORY = {
+      dockerfile: 'code', makefile: 'code', 'cmakelists.txt': 'code', '.gitignore': 'config',
+      '.gitattributes': 'config', '.env': 'config', '.npmrc': 'config', '.dockerignore': 'config',
+      '.editorconfig': 'config', license: 'doc', 'readme': 'doc', notice: 'doc', authors: 'doc',
+      gemsfile: 'code', rakefile: 'code',
+    }
+
+    /** The family glyph key of one file name ('' → the generic file icon). */
+    function fileCategory(name) {
+      var lower = String(name).toLowerCase()
+      var byName = NAME_CATEGORY[lower]
+      if (byName !== undefined) return byName
+      var dot = lower.lastIndexOf('.')
+      if (dot <= 0 || dot === lower.length - 1) return ''
+      var ext = lower.slice(dot + 1)
+      return EXT_TO_CATEGORY[ext] || ''
+    }
+
     function svgIcon(pathData) {
       var span = document.createElement('span')
       span.className = 'nfo-x-svg'
@@ -1148,9 +1214,11 @@ window.__ModuleLoader__.load({
           if (expanded[entry.path] === true) chev.setAttribute('data-open', '')
         }
         node.appendChild(chev)
+        var category = entry.isDir ? 'folder' : fileCategory(entry.name)
         var ico = document.createElement('span')
         ico.className = 'nfo-x-ico'
-        ico.appendChild(svgIcon(entry.isDir ? ICON_FOLDER : ICON_FILE))
+        ico.setAttribute('data-cat', category)
+        ico.appendChild(svgIcon(entry.isDir ? ICON_FOLDER : (ICON_CAT[category] || ICON_FILE)))
         node.appendChild(ico)
         var name = document.createElement('span')
         name.className = 'nfo-x-name'
