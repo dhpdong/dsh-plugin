@@ -77,6 +77,7 @@ window.__ModuleLoader__.load({
 .nfo-x-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
 .nfo-x-hidden .nfo-x-name{opacity:.55}
 .nfo-x-note{padding:5px 14px;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.nfo-x-retry{cursor:pointer;color:var(--dsw-alias-label-secondary,#aaa);text-decoration:underline;text-underline-offset:2px}
 .nfo-picker{display:flex;flex-direction:column;width:min(520px,92vw);height:min(66vh,580px);gap:8px}
 .nfo-picker-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;padding:6px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#1e1e24);color:var(--dsw-alias-label-secondary,#aaa);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .nfo-picker-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:1px;padding:2px}
@@ -1067,17 +1068,47 @@ window.__ModuleLoader__.load({
         return node
       }
 
+      // A request that never answers (the page outlived a host restart) must
+      // not leave the tree spinning forever: every load has a deadline, and
+      // transient failures (a session still hydrating right after a switch)
+      // retry silently before the error surfaces with a manual retry.
+      var MAX_ATTEMPTS = 3
+      var LOAD_TIMEOUT_MS = 6000
+      var attempts = {}
+
       function load(path) {
         if (disposed || loading[path] === true) return
         loading[path] = true
+        var settled = false
+        var timer = window.setTimeout(function () {
+          settle({ error: L('连接宿主超时（宿主可能已重启），点此重试', 'The host did not answer (it may have restarted) — click to retry'), final: true })
+        }, LOAD_TIMEOUT_MS)
+        function settle(result) {
+          if (settled || disposed) return
+          settled = true
+          window.clearTimeout(timer)
+          delete loading[path]
+          if (result.error !== undefined) {
+            attempts[path] = (attempts[path] || 0) + 1
+            // Only a fast failure (a session still hydrating after a switch)
+            // is worth retrying; a silent timeout means the page lost the
+            // host and the user must reload, so surface it at once.
+            if (result.final !== true && attempts[path] < MAX_ATTEMPTS) {
+              window.setTimeout(function () { if (!disposed) load(path) }, 1200 * attempts[path])
+              return
+            }
+            delete attempts[path]
+            cache[path] = { error: result.error }
+          } else {
+            delete attempts[path]
+            cache[path] = { entries: result.entries || [] }
+          }
+          render()
+        }
         sidebarCall(ctx, 'fs.tree', { path: path }).then(function (listing) {
-          delete loading[path]
-          cache[path] = { entries: listing.entries || [] }
-          render()
+          settle({ entries: listing.entries })
         }, function (error) {
-          delete loading[path]
-          cache[path] = { error: String(error && error.message ? error.message : error) }
-          render()
+          settle({ error: String(error && error.message ? error.message : error) })
         })
       }
 
@@ -1152,7 +1183,15 @@ window.__ModuleLoader__.load({
           return
         }
         if (listing.error !== undefined) {
-          body.appendChild(note(listing.error))
+          var failed = note(listing.error)
+          failed.className += ' nfo-x-retry'
+          failed.title = L('点击重试', 'Click to retry')
+          failed.addEventListener('click', function () {
+            delete cache[root]
+            attempts[root] = 0
+            render()
+          })
+          body.appendChild(failed)
           return
         }
         if (listing.entries.length === 0) {
