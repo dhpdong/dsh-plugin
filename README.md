@@ -13,7 +13,7 @@ DSH（DeepSeek Harness）Web 插件集——单仓多插件结构，**每个插�
 | [dsh-session-manager](packages/dsh-session-manager) | 会话标题栏 🗑️ 按钮，**彻底删除**不再需要的会话（移入系统回收站） | 零依赖 |
 | [dsh-directory-picker-enhanced](packages/dsh-directory-picker-enhanced) | 「添加工作区」目录选择器增强：**上一级**按钮 + **盘符下拉** | 零依赖 |
 | [dsh-inline-diff](packages/dsh-inline-diff) | Edit / Write 工具 diff 在对话中**常驻展开**（Claude Code 风格） | 零依赖 |
-| [dsh-native-file-ops](packages/dsh-native-file-ops) | **原生右侧栏文件树增强（当前主要文件入口）**：右键新建/重命名/下载/回收站/复制路径 + 拖拽移动 + 文档预览内编辑；依赖 `dsh-sidebar-lite` 的 `/sidebar/api/*` carrier | `trash` |
+| [dsh-native-file-ops](packages/dsh-native-file-ops) | **原生右侧栏文件树增强（当前主要文件入口）**：右键新建/重命名/下载/回收站/复制路径 + 拖拽移动 + 文档打开即编辑（自动保存）；依赖 `dsh-sidebar-lite` 的 `/sidebar/api/*` carrier | `trash` |
 
 ## 安装单个插件
 

@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
 .nfo-dialog .nfo-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .nfo-dialog button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 .nfo-dialog button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
-.nfo-doc-edit{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);cursor:pointer}
+.nfo-doc-edit{display:none;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);cursor:pointer}
 .nfo-doc-edit:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#eee)}
 .nfo-edit-overlay{position:fixed;inset:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)}
 .nfo-edit{display:flex;flex-direction:column;width:min(900px,92vw);height:min(72vh,720px);border:1px solid var(--dsw-alias-border-l1,#333);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#18181d);box-shadow:0 24px 70px rgba(0,0,0,.55);color:var(--dsw-alias-label-primary,#eee);font:13px/1.5 system-ui,sans-serif;overflow:hidden}
@@ -441,6 +441,7 @@ window.__ModuleLoader__.load({
     // truncated read can never overwrite the rest of the file.
 
     var editorOverlay = null
+    var autoFrame = null
 
     function PencilGlyph() {
       return React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true' },
@@ -477,13 +478,22 @@ window.__ModuleLoader__.load({
           return
         }
       }
+      var auto = preview !== null && preview.getAttribute('data-nfo-auto-pending') === '1'
+      function markSkip() {
+        if (preview === null) return
+        var owner = preview.closest('[data-sidebar-right-tab]')
+        var pathNode = owner === null ? null : owner.querySelector('[data-textpreview-path]')
+        preview.setAttribute('data-nfo-auto-skip', pathNode === null ? '' : (pathNode.textContent || ''))
+      }
       sidebarCall(ctx, 'fs.read', { path: path }).then(function (value) {
         if (value.kind !== 'text') {
-          toast(L('该文件不是文本，无法编辑', 'Not a text file'))
+          markSkip()
+          if (!auto) toast(L('该文件不是文本，无法编辑', 'Not a text file'))
           return
         }
         if (value.truncated === true) {
-          toast(L('文件过大，暂不支持在浏览器中编辑', 'File too large to edit here'))
+          markSkip()
+          if (!auto) toast(L('文件过大，暂不支持在浏览器中编辑', 'File too large to edit here'))
           return
         }
         // Edit in place inside the document body when the action lives in a
@@ -492,7 +502,8 @@ window.__ModuleLoader__.load({
         if (preview !== null) showInlineEditor(ctx, path, value.content, preview)
         else showTextEditor(ctx, path, value.content)
       }).catch(function (error) {
-        toast(String(error && error.message ? error.message : error))
+        markSkip()
+        if (!auto) toast(String(error && error.message ? error.message : error))
       })
     }
 
@@ -627,6 +638,7 @@ window.__ModuleLoader__.load({
      * exactly where they are — only the scrollable body is covered.
      */
     function showInlineEditor(ctx, path, initial, preview) {
+      preview.removeAttribute('data-nfo-auto-pending')
       var existing = preview.querySelector('.nfo-inplace')
       if (existing !== null) {
         var previous = existing.__nfoCleanup
@@ -645,20 +657,11 @@ window.__ModuleLoader__.load({
       bar.className = 'nfo-inplace-bar'
       var dirtyDot = document.createElement('span')
       dirtyDot.className = 'nfo-edit-dirty'
-      var hint = document.createElement('span')
-      hint.className = 'nfo-inplace-hint'
-      hint.textContent = L('编辑中 · Ctrl+S 保存 · Esc 取消', 'Editing · Ctrl+S save · Esc cancel')
-      var cancelButton = document.createElement('button')
-      cancelButton.type = 'button'
-      cancelButton.textContent = L('取消', 'Cancel')
-      var saveButton = document.createElement('button')
-      saveButton.type = 'button'
-      saveButton.className = 'nfo-primary'
-      saveButton.textContent = L('保存', 'Save')
+      var status = document.createElement('span')
+      status.className = 'nfo-inplace-hint'
+      status.textContent = L('自动保存 · Ctrl+S 立即保存', 'Auto-save · Ctrl+S saves now')
       bar.appendChild(dirtyDot)
-      bar.appendChild(hint)
-      bar.appendChild(cancelButton)
-      bar.appendChild(saveButton)
+      bar.appendChild(status)
 
       var textarea = document.createElement('textarea')
       textarea.className = 'nfo-inplace-text'
@@ -671,68 +674,111 @@ window.__ModuleLoader__.load({
       box.appendChild(textarea)
       preview.appendChild(box)
 
-      var dirty = false
+      var savedValue = initial
+      var timer = null
       var saving = false
       var closed = false
 
       function setDirty(value) {
-        dirty = value
         if (value) dirtyDot.setAttribute('data-dirty', '')
         else dirtyDot.removeAttribute('data-dirty')
       }
 
+      function setStatus(text, dirty) {
+        status.textContent = text
+        setDirty(dirty)
+      }
+
+      function requestSave() {
+        if (saving || closed) return
+        if (textarea.value === savedValue) {
+          setStatus(L('已保存 · Ctrl+S 立即保存', 'Saved · Ctrl+S saves now'), false)
+          return
+        }
+        saving = true
+        setStatus(L('保存中…', 'Saving…'), true)
+        var value = textarea.value
+        sidebarCall(ctx, 'fs.write', { path: path, content: value }).then(function () {
+          saving = false
+          savedValue = value
+          setStatus(L('已保存 · Ctrl+S 立即保存', 'Saved · Ctrl+S saves now'), false)
+        }).catch(function (error) {
+          saving = false
+          setStatus(L('保存失败：', 'Save failed: ') + String(error && error.message ? error.message : error), true)
+        })
+      }
+
+      function scheduleSave() {
+        if (timer !== null) window.clearTimeout(timer)
+        timer = window.setTimeout(function () {
+          timer = null
+          requestSave()
+        }, 800)
+      }
+
+      function flushOnExit() {
+        if (closed || textarea.value === savedValue) return
+        var state = ctxState(ctx)
+        if (state === undefined) return
+        try {
+          fetch('/sidebar/api/fs.write', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            keepalive: true,
+            body: JSON.stringify({ sessionId: state.sessionId, cwd: state.cwd, path: path, content: textarea.value }),
+          }).catch(function () {})
+        } catch (error) { /* ignore */ }
+      }
+
       function cleanup() {
         if (closed) return
+        if (timer !== null) {
+          window.clearTimeout(timer)
+          timer = null
+        }
+        flushOnExit()
         closed = true
         document.removeEventListener('keydown', onKey, true)
+        window.removeEventListener('pagehide', onPageHide)
+        removal.disconnect()
         box.remove()
         preview.style.position = wasPosition
         preview.style.overflow = wasOverflow
       }
       box.__nfoCleanup = cleanup
 
-      function close() {
-        if (saving) return
-        if (dirty && !window.confirm(L('放弃未保存的修改？', 'Discard unsaved changes?'))) return
-        cleanup()
-      }
-
-      function save() {
-        if (saving || closed) return
-        saving = true
-        saveButton.disabled = true
-        saveButton.textContent = L('保存中…', 'Saving…')
-        sidebarCall(ctx, 'fs.write', { path: path, content: textarea.value }).then(function () {
-          saving = false
-          setDirty(false)
-          cleanup()
-          toast(L('已保存', 'Saved'))
-          reloadTextPreview()
-        }).catch(function (error) {
-          saving = false
-          saveButton.disabled = false
-          saveButton.textContent = L('保存', 'Save')
-          toast(String(error && error.message ? error.message : error))
-        })
-      }
-
       function onKey(event) {
         if (!box.isConnected) { cleanup(); return }
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          close()
-          return
-        }
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
           event.preventDefault()
-          save()
+          if (timer !== null) {
+            window.clearTimeout(timer)
+            timer = null
+          }
+          requestSave()
         }
       }
 
-      textarea.addEventListener('input', function () { setDirty(true) })
-      cancelButton.addEventListener('click', close)
-      saveButton.addEventListener('click', save)
+      function onPageHide() { flushOnExit() }
+
+      var removal = new MutationObserver(function () {
+        if (!box.isConnected) cleanup()
+      })
+
+      textarea.addEventListener('input', function () {
+        setStatus(L('未保存 · 自动保存中…', 'Unsaved · auto-saving…'), true)
+        scheduleSave()
+      })
+      textarea.addEventListener('blur', function () {
+        if (timer !== null) {
+          window.clearTimeout(timer)
+          timer = null
+        }
+        requestSave()
+      })
+      removal.observe(preview, { childList: true })
       document.addEventListener('keydown', onKey, true)
+      window.addEventListener('pagehide', onPageHide)
       textarea.focus()
       textarea.setSelectionRange(0, 0)
     }
@@ -750,20 +796,50 @@ window.__ModuleLoader__.load({
       }, PencilGlyph())
     }
 
-    /** Double-click a text preview body to enter the in-place editor: the
-     *  header pencil stays for discoverability, but editing needs no button. */
-    function onPreviewDoubleClick(event) {
-      var target = event.target
-      if (!target || typeof target.closest !== 'function') return
-      if (target.closest('a, button, input, textarea, select') !== null) return
-      var body = target.closest('[data-textpreview-body]')
-      if (body === null) return
-      var host = body.closest('[data-sidebar-right-tab]')
-      if (host === null) return
-      var button = host.querySelector('button.nfo-doc-edit')
-      if (button === null) return
-      event.preventDefault()
-      button.click()
+    /**
+     * The merged browser/editor experience: every visible text preview opens
+     * its in-place editor as soon as it appears, no click or double-click.
+     * A hidden header action carries the absolute path and reuses the same
+     * open path; previews that cannot be edited (binary, truncated) carry a
+     * path-keyed skip marker so the observer never loops on them.
+     */
+    function autoOpenPreviewEditors() {
+      var tabs = document.querySelectorAll('[data-sidebar-right-tab]')
+      for (var i = 0; i < tabs.length; i += 1) {
+        var tab = tabs[i]
+        if (tab.getClientRects().length === 0) continue
+        if (tab.querySelector('[data-textpreview-unsupported]') !== null) continue
+        var body = null
+        var bodies = tab.querySelectorAll('[data-textpreview-body]')
+        for (var j = 0; j < bodies.length; j += 1) {
+          if (bodies[j].getClientRects().length > 0) { body = bodies[j]; break }
+        }
+        if (body === null) continue
+        if (body.querySelector('.nfo-inplace') !== null) continue
+        if (body.getAttribute('data-nfo-auto-pending') === '1') continue
+        var pathNode = tab.querySelector('[data-textpreview-path]')
+        var pathKey = pathNode === null ? '' : (pathNode.textContent || '')
+        if (body.getAttribute('data-nfo-auto-skip') === pathKey) continue
+        var button = tab.querySelector('button.nfo-doc-edit')
+        if (button === null) continue
+        body.setAttribute('data-nfo-auto-pending', '1')
+        button.click()
+        window.setTimeout((function (target) {
+          return function () {
+            if (target.isConnected && target.querySelector('.nfo-inplace') === null) {
+              target.removeAttribute('data-nfo-auto-pending')
+            }
+          }
+        })(body), 4000)
+      }
+    }
+
+    function scheduleAutoOpenEditors() {
+      if (autoFrame !== null) return
+      autoFrame = window.requestAnimationFrame(function () {
+        autoFrame = null
+        autoOpenPreviewEditors()
+      })
     }
 
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
@@ -786,6 +862,9 @@ window.__ModuleLoader__.load({
       document.head.appendChild(style)
       var observer = new MutationObserver(function () { markDraggable() })
       observer.observe(document.body, { childList: true, subtree: true })
+      var autoObserver = new MutationObserver(function () { scheduleAutoOpenEditors() })
+      autoObserver.observe(document.body, { childList: true, subtree: true })
+      scheduleAutoOpenEditors()
       markDraggable()
       document.addEventListener('contextmenu', onContextMenu, true)
       document.addEventListener('dragstart', onDragStart, true)
@@ -793,7 +872,6 @@ window.__ModuleLoader__.load({
       document.addEventListener('dragleave', onDragLeave, true)
       document.addEventListener('drop', onDrop, true)
       document.addEventListener('dragend', onDragEnd, true)
-      document.addEventListener('dblclick', onPreviewDoubleClick, true)
       document.addEventListener('mousedown', function (event) {
         if (event.target.closest && event.target.closest('#dfo-menu') === null) closeMenu()
       }, true)
@@ -803,13 +881,17 @@ window.__ModuleLoader__.load({
       ctx.effect(function () {
         return function () {
           observer.disconnect()
+          autoObserver.disconnect()
+          if (autoFrame !== null) {
+            window.cancelAnimationFrame(autoFrame)
+            autoFrame = null
+          }
           document.removeEventListener('contextmenu', onContextMenu, true)
           document.removeEventListener('dragstart', onDragStart, true)
           document.removeEventListener('dragover', onDragOver, true)
           document.removeEventListener('dragleave', onDragLeave, true)
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
-          document.removeEventListener('dblclick', onPreviewDoubleClick, true)
           closeMenu()
         }
       })
