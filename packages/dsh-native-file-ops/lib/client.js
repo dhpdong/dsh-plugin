@@ -836,10 +836,13 @@ window.__ModuleLoader__.load({
 
     function scheduleAutoOpenEditors() {
       if (autoFrame !== null) return
-      autoFrame = window.requestAnimationFrame(function () {
+      // A short timer instead of rAF: the observer sees every streaming chat
+      // mutation, and a 60ms coalescing window keeps the scan off the frame
+      // budget while still feeling immediate.
+      autoFrame = window.setTimeout(function () {
         autoFrame = null
         autoOpenPreviewEditors()
-      })
+      }, 60)
     }
 
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
@@ -883,7 +886,7 @@ window.__ModuleLoader__.load({
           observer.disconnect()
           autoObserver.disconnect()
           if (autoFrame !== null) {
-            window.cancelAnimationFrame(autoFrame)
+            window.clearTimeout(autoFrame)
             autoFrame = null
           }
           document.removeEventListener('contextmenu', onContextMenu, true)
