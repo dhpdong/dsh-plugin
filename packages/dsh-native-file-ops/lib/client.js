@@ -52,6 +52,13 @@ window.__ModuleLoader__.load({
 .nfo-edit-foot button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 .nfo-edit-foot button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
 .nfo-edit-foot button:disabled{opacity:.5;cursor:default}
+.nfo-inplace{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base,#111);min-height:0}
+.nfo-inplace-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,#333);flex:0 0 auto}
+.nfo-inplace-hint{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-tertiary,#888);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nfo-inplace-bar button{height:26px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:12px/1 system-ui,sans-serif;cursor:pointer}
+.nfo-inplace-bar button.nfo-primary{border-color:transparent;background:var(--dsw-alias-button-info-fill,#4a7dff);color:#fff}
+.nfo-inplace-bar button:disabled{opacity:.5;cursor:default}
+.nfo-inplace-text{box-sizing:border-box;flex:1 1 auto;min-height:0;width:100%;padding:10px 14px;border:0;outline:none;resize:none;background:transparent;color:var(--dsw-alias-label-primary,#eee);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
 `
     var locale = 'en'
     var isZh = function () { return String(locale).toLowerCase().indexOf('zh') === 0 }
@@ -451,7 +458,25 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function openTextEditor(ctx, path) {
+    function openTextEditor(ctx, path, button) {
+      // Resolve the preview body up front so a second pencil click focuses
+      // the running editor instead of re-reading and discarding edits.
+      var host = button && button.closest ? button.closest('[data-sidebar-right-tab]') : null
+      var preview = null
+      if (host !== null) {
+        var nodes = host.querySelectorAll('[data-textpreview-body]')
+        for (var i = 0; i < nodes.length; i += 1) {
+          if (nodes[i].getClientRects().length > 0) { preview = nodes[i]; break }
+        }
+      }
+      if (preview !== null) {
+        var running = preview.querySelector('.nfo-inplace')
+        if (running !== null) {
+          var area = running.querySelector('.nfo-inplace-text')
+          if (area !== null) area.focus()
+          return
+        }
+      }
       sidebarCall(ctx, 'fs.read', { path: path }).then(function (value) {
         if (value.kind !== 'text') {
           toast(L('该文件不是文本，无法编辑', 'Not a text file'))
@@ -461,7 +486,11 @@ window.__ModuleLoader__.load({
           toast(L('文件过大，暂不支持在浏览器中编辑', 'File too large to edit here'))
           return
         }
-        showTextEditor(ctx, path, value.content)
+        // Edit in place inside the document body when the action lives in a
+        // real preview tab; the modal stays as the fallback for any other
+        // invocation (e.g. a detached action surface).
+        if (preview !== null) showInlineEditor(ctx, path, value.content, preview)
+        else showTextEditor(ctx, path, value.content)
       }).catch(function (error) {
         toast(String(error && error.message ? error.message : error))
       })
@@ -592,6 +621,122 @@ window.__ModuleLoader__.load({
       textarea.setSelectionRange(0, 0)
     }
 
+    /**
+     * The in-place editor: a textarea layered over the document body, with a
+     * compact save/cancel bar. Keeps the tab, path header and preview chrome
+     * exactly where they are — only the scrollable body is covered.
+     */
+    function showInlineEditor(ctx, path, initial, preview) {
+      var existing = preview.querySelector('.nfo-inplace')
+      if (existing !== null) {
+        var previous = existing.__nfoCleanup
+        if (typeof previous === 'function') previous()
+        else existing.remove()
+      }
+      var wasPosition = preview.style.position
+      var wasOverflow = preview.style.overflow
+      if (window.getComputedStyle(preview).position === 'static') preview.style.position = 'relative'
+      preview.style.overflow = 'hidden'
+
+      var box = document.createElement('div')
+      box.className = 'nfo-inplace'
+
+      var bar = document.createElement('div')
+      bar.className = 'nfo-inplace-bar'
+      var dirtyDot = document.createElement('span')
+      dirtyDot.className = 'nfo-edit-dirty'
+      var hint = document.createElement('span')
+      hint.className = 'nfo-inplace-hint'
+      hint.textContent = L('编辑中 · Ctrl+S 保存 · Esc 取消', 'Editing · Ctrl+S save · Esc cancel')
+      var cancelButton = document.createElement('button')
+      cancelButton.type = 'button'
+      cancelButton.textContent = L('取消', 'Cancel')
+      var saveButton = document.createElement('button')
+      saveButton.type = 'button'
+      saveButton.className = 'nfo-primary'
+      saveButton.textContent = L('保存', 'Save')
+      bar.appendChild(dirtyDot)
+      bar.appendChild(hint)
+      bar.appendChild(cancelButton)
+      bar.appendChild(saveButton)
+
+      var textarea = document.createElement('textarea')
+      textarea.className = 'nfo-inplace-text'
+      textarea.spellcheck = false
+      textarea.wrap = 'off'
+      textarea.value = initial
+      textarea.setAttribute('aria-label', L('文件内容', 'File content'))
+
+      box.appendChild(bar)
+      box.appendChild(textarea)
+      preview.appendChild(box)
+
+      var dirty = false
+      var saving = false
+      var closed = false
+
+      function setDirty(value) {
+        dirty = value
+        if (value) dirtyDot.setAttribute('data-dirty', '')
+        else dirtyDot.removeAttribute('data-dirty')
+      }
+
+      function cleanup() {
+        if (closed) return
+        closed = true
+        document.removeEventListener('keydown', onKey, true)
+        box.remove()
+        preview.style.position = wasPosition
+        preview.style.overflow = wasOverflow
+      }
+      box.__nfoCleanup = cleanup
+
+      function close() {
+        if (saving) return
+        if (dirty && !window.confirm(L('放弃未保存的修改？', 'Discard unsaved changes?'))) return
+        cleanup()
+      }
+
+      function save() {
+        if (saving || closed) return
+        saving = true
+        saveButton.disabled = true
+        saveButton.textContent = L('保存中…', 'Saving…')
+        sidebarCall(ctx, 'fs.write', { path: path, content: textarea.value }).then(function () {
+          saving = false
+          setDirty(false)
+          cleanup()
+          toast(L('已保存', 'Saved'))
+          reloadTextPreview()
+        }).catch(function (error) {
+          saving = false
+          saveButton.disabled = false
+          saveButton.textContent = L('保存', 'Save')
+          toast(String(error && error.message ? error.message : error))
+        })
+      }
+
+      function onKey(event) {
+        if (!box.isConnected) { cleanup(); return }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          close()
+          return
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault()
+          save()
+        }
+      }
+
+      textarea.addEventListener('input', function () { setDirty(true) })
+      cancelButton.addEventListener('click', close)
+      saveButton.addEventListener('click', save)
+      document.addEventListener('keydown', onKey, true)
+      textarea.focus()
+      textarea.setSelectionRange(0, 0)
+    }
+
     /** The document header action: edit the previewed file in place. */
     function DocEditAction(props) {
       var path = props && typeof props.absolutePath === 'string' ? props.absolutePath : ''
@@ -601,7 +746,7 @@ window.__ModuleLoader__.load({
         className: 'nfo-doc-edit',
         title: L('编辑', 'Edit'),
         'aria-label': L('编辑', 'Edit'),
-        onClick: function () { if (currentCtx) openTextEditor(currentCtx, path) },
+        onClick: function (event) { if (currentCtx) openTextEditor(currentCtx, path, event.currentTarget) },
       }, PencilGlyph())
     }
 
