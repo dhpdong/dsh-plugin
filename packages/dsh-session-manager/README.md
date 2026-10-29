@@ -6,6 +6,18 @@ DSH Web 插件：**彻底删除不再需要的会话**。
 
 在会话标题栏右侧（Session log 旁）添加一个 🗑️ 按钮，点开即列出全部持久化会话；对确认不再使用的会话一键永久删除——其磁盘记录被移入**系统回收站**，左侧工作区会话列表随之清爽。补齐 DSH「归档只是隐藏、删除工作区只是解除分组」之外缺失的第三种能力。
 
+## 适配 DSH 0.2.1
+
+DSH 0.2 的持久化接口改为「快照 + 句柄」：`sessionPersistence.list()` 返回
+`{ header, revision }`，旧的 `locate()`/`inspect()` 已移除。本插件因此：
+
+- 从快照的 `header` 读取会话 id / cwd，标题对**运行中**会话通过
+  `sessionTitle` 读取；
+- 按 `<$DSH_HOME>/sessions/<project>/<session-id>/` 的目录布局定位会话目录
+  （会话 id 本身是文件系统安全字符，扫描一层项目目录即可）；
+- 删除前先用 `workspaceController.archiveSession()` 归档，并拒绝删除仍在
+  运行的会话（避免写租约被破坏）。
+
 ## 为什么需要它
 
 DSH 对会话只有两种处置：

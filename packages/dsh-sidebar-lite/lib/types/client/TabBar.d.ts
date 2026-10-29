@@ -39,6 +39,8 @@ export declare function TabBar(props: {
     /** Float a tab out as a free window (the tab context menu's entry; the
      *  drag-to-conversation gesture is handled at the Sidebar shell level). */
     onFloatTab: (tabId: string) => void;
+    /** Retitle one tab (the tab context menu's rename entry). */
+    onRenameTab: (tabId: string, title: string) => void;
     /** Icon resolver for tab labels (reads from the tab descriptor registry). */
     getTabIcon?: (tab: SidebarTab) => ReactNode;
     /** Badge resolver for tab labels (reads the descriptor's `badge`; the

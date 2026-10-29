@@ -18,7 +18,7 @@ import { basename, dirname, join } from 'node:path'
 import trash from 'trash'
 import type { SidebarHttpRequest } from './context-types.ts'
 import { isWithin, requireAbsolute } from './fs-tree.ts'
-import { ensureWorkspacePath, ensureWorkspaceWritePath } from './path-security.ts'
+import { ensureWorkspacePath, ensureWorkspaceWritePath, isOutsideWorkspaceAllowed } from './path-security.ts'
 import { SidebarError } from './wire.ts'
 
 /** Inputs of one upload: the session scope plus the request body stream. */
@@ -92,6 +92,28 @@ export async function createWorkspaceEntry(
  */
 export async function trashWorkspacePath(cwd: string, target: string): Promise<{ path: string }> {
   const absolute = requireAbsolute(target)
+  // Global file-browser mode: the target may live outside the session
+  // workspace, so only the two structural guards survive (a filesystem root
+  // and the session workspace root itself are never trashed).
+  if (isOutsideWorkspaceAllowed()) {
+    const realParent = await realpath(dirname(absolute)).catch((error: unknown) => {
+      throw new SidebarError('fs-error', `cannot resolve target parent "${dirname(absolute)}": ${error instanceof Error ? error.message : String(error)}`, 400)
+    })
+    const safeTarget = join(realParent, basename(absolute))
+    const parent = dirname(safeTarget)
+    if (parent === safeTarget || safeTarget === requireAbsolute(cwd)) {
+      throw new SidebarError('forbidden', 'refusing to trash a filesystem root', 403)
+    }
+    await lstat(safeTarget).catch((error: unknown) => {
+      throw new SidebarError('fs-error', `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400)
+    })
+    try {
+      await trash(safeTarget, { glob: false })
+    } catch (error) {
+      throw new SidebarError('fs-error', `cannot trash "${safeTarget}": ${error instanceof Error ? error.message : String(error)}`, 400)
+    }
+    return { path: safeTarget }
+  }
   const root = requireAbsolute(cwd)
   if (isWithin(root, absolute) && isWithin(absolute, root)) {
     throw new SidebarError('forbidden', 'refusing to trash the workspace root', 403)

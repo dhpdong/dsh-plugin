@@ -1,6 +1,6 @@
 {
   "id": "dsh-external/dsh-session-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "main": "./lib/index.js",
   "description": "DSH plugin: permanently delete sessions from disk.",
   "engines": {

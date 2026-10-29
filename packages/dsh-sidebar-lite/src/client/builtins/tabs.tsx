@@ -7,7 +7,7 @@
  * `browser:<n>` the same way (no quota). The editor IS the files window
  * (the old standalone explorer merged into it).
  */
-import { IconBranchOutline16, IconCodeOutline16, IconFolderOpen16, IconNewChatOutline16, IconPanelLeftOutline16, IconThinkOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranchOutlineRegular, IconCodeOutlineRegular, IconFolderOpenRegular, IconNewChatOutlineRegular, IconPanelLeftOutlineRegular, IconThinkOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context } from '../../context-types.ts'
 import { allLeaves, isAgentTabId, type SidebarState } from '../state.ts'
 import { t } from '../locales.ts'
@@ -71,7 +71,11 @@ function terminalUuid(): string {
 
 /** Count UI-owned terminals (agent:` tabs excluded — they are the model's). */
 function uiTerminalCount(state: SidebarState): number {
+  // Terminals live in the BOTTOM panel in this fork (the right panel is
+  // disabled), so the count must cover both trees — otherwise the quota never
+  // engages and every new terminal reuses the first ordinal ("bash" × N).
   return allLeaves(state.splits)
+    .concat(allLeaves(state.bottomSplits))
     .flatMap(leaf => leaf.tabs)
     .filter(tab => tab.type === 'terminal' && !isAgentTabId(tab.id)).length
 }
@@ -85,7 +89,7 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
       // explorer (empty hint + docked tree); with a path it previews/edits
       // the file. Visible in the + menu in the explorer's old slot.
       title: () => t('files'),
-      icon: (size: number) => <IconFolderOpen16 size={size} />,
+      icon: (size: number) => <IconFolderOpenRegular size={size} />,
       order: 10,
       hidden: false,
       dedupeKey: (tab) => tab.path,
@@ -103,13 +107,13 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
           options: [
             {
               value: true,
-              icon: (size: number) => <IconPanelLeftOutline16 size={size} />,
+              icon: (size: number) => <IconPanelLeftOutlineRegular size={size} />,
               title: () => t('editorExplorerMerged'),
               desc: () => t('editorExplorerMergedDesc'),
             },
             {
               value: false,
-              icon: (size: number) => <IconCodeOutline16 size={size} />,
+              icon: (size: number) => <IconCodeOutlineRegular size={size} />,
               title: () => t('editorExplorerSplit'),
               desc: () => t('editorExplorerSplitDesc'),
             },
@@ -135,7 +139,7 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
     {
       id: 'git',
       title: () => t('git'),
-      icon: (size: number) => <IconBranchOutline16 size={size} />,
+      icon: (size: number) => <IconBranchOutlineRegular size={size} />,
       order: 20,
       single: true,
       component: ({ ctx, store, scope, visible, onOpenDiff }) => (
@@ -150,7 +154,7 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
     {
       id: 'subagent',
       title: () => t('subagent'),
-      icon: (size: number) => <IconThinkOutline16 size={size} />,
+      icon: (size: number) => <IconThinkOutlineRegular size={size} />,
       order: 30,
       single: true,
       // Declarative settings: the auto-open switches render under this row in
@@ -178,7 +182,7 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
     {
       id: 'sidechat',
       title: () => t('sideChat'),
-      icon: (size: number) => <IconNewChatOutline16 size={size} />,
+      icon: (size: number) => <IconNewChatOutlineRegular size={size} />,
       order: 35,
       // Codex-style: EVERY side conversation is its own tab. A plain open
       // mints a fresh tab flagged `autoCreate` (the view creates the EMPTY
@@ -271,11 +275,15 @@ export function builtinTabs(ctx: Context, options: BuiltinTabOptions = {}): read
       createTab: (state) => {
         const count = uiTerminalCount(state)
         if (count >= TERMINAL_LIMIT) return null
+        // The first terminal keeps the bare shell name ("bash"); later ones
+        // get an ordinal so the strip never shows two identical chips.
+        // Renaming is available from the tab's context menu.
+        const base = options.terminalTitle?.() ?? t('terminal')
         return {
           tab: {
             id: `terminal:${terminalUuid()}`,
             type: 'terminal',
-            title: options.terminalTitle?.() ?? t('terminal'),
+            title: count === 0 ? base : `${base} ${count + 1}`,
           },
           // Keep the legacy counter advancing for compatibility with older
           // persisted states; new ids no longer use it.

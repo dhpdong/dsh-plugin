@@ -31,11 +31,11 @@
 import { createElement, memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from 'react'
 import { useSyncExternalStore } from 'react'
 import clsx from 'clsx'
-import { IconCloseFill14, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseFillRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context, SidebarSessionList } from '../context-types.ts'
 import { appendToDraft } from './conversation-draft.ts'
 import {
-  BOTTOM_MIN, PANEL_MIN, agentUuidOf, dockFloat, firstLeaf, floatTab, isAgentTabId, leafWithTab, migrateBottomTabs,
+  BOTTOM_MIN, PANEL_MIN, agentUuidOf, currentSessionIdOf, dockFloat, firstLeaf, floatTab, isAgentTabId, leafWithTab, migrateBottomTabs,
   moveFloat, moveTab, moveTabToEdge, openDiffTab, raiseFloat, reconcileAgentTerminals,
   resizeFloat, resizeSplitIn, setBottomHeight, setWidth, toggleBottomPanel, toggleExpanded, togglePanel,
   type DropZone, type SidebarState, type SidebarStore, type SidebarTab, type SplitNode,
@@ -64,6 +64,16 @@ import css from './sidebar.module.css'
 /** How many consecutive reconnect failures stop the agent-terminals push loop
  * (mirror of the terminal view's own cap; the loop restarts on session switch). */
 const FAILURE_LIMIT = 3
+
+/**
+ * The side workbench is RETIRED: DSH's native right sidebar (files) replaced
+ * it, and this plugin is kept only for its host file APIs (the native tree's
+ * context menu, download, rename and drag-move call /sidebar/api) plus the
+ * bottom terminal panel. The corner toggle and the right panel are gone; the
+ * code stays behind this switch so the workbench can be revived without
+ * re-adding the wiring.
+ */
+const RIGHT_PANEL_ENABLED = false
 
 /**
  * Subagent auto-open debounce (ms). The host delivers a new child's origin
@@ -168,6 +178,11 @@ function buildNewTabOptions(state: SidebarState, ctx: Context, scope: SessionSco
   const service = ctx.get('betterSidebar')
   if (service === undefined) return []
   return service.getTabs()
+    // This fork keeps the right panel disabled: the bottom panel only hosts
+    // terminals, so the workbench-only types (explorer/git/subagent/sidechat/
+    // browser/diff) would just clutter the + menu. With terminal as the only
+    // option, the + button creates it directly (see TabBar).
+    .filter(d => RIGHT_PANEL_ENABLED || d.id === 'terminal')
     .filter(d => !d.hidden && service.isTabEnabled(d.id))
     .sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
     .map(d => ({
@@ -289,7 +304,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     useMemo(() => (callback: () => void) => ctx.sessions.list.subscribe(callback), [ctx]),
     useCallback(() => ctx.sessions.list.getSnapshot(), [ctx]),
   )
-  const current = sessionList.current
+  const current = currentSessionIdOf(sessionList)
 
   // Per-session sidebar state.
   const snapshot = useSyncExternalStore(
@@ -300,6 +315,19 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
 
   const state = snapshot.state
   const sessionId = snapshot.sessionId
+
+  // Native right Sidebar docking: while the native files column is open AND
+  // the bottom panel is expanded, the terminal docks UNDER that column
+  // instead of squeezing the conversation. The panel simply moves to the
+  // right slice; the native column yields the same height through CSS
+  // (layout.css), so the file tree ends where the terminal begins.
+  const [dockRight, setDockRight] = useState(false)
+  const dockRightRef = useRef(false)
+  const dockLeftRef = useRef(0)
+  const bottomOpenRef = useRef(false)
+  const narrowRef = useRef(false)
+  bottomOpenRef.current = state?.bottomOpen === true
+  narrowRef.current = narrow
   const summaryCwd = sessionId === undefined ? undefined : sessionList.byId[sessionId]?.cwd
   const pushedBottomHeight = (bottomOpen: boolean, bottomHeight: number): number => layoutPushSize({
     narrow,
@@ -316,7 +344,9 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   // capsule) must yield. layout.css keys off this body attribute to push the
   // header's right padding out past the cluster. Only the CLOSED panel needs
   // it — an open panel already squeezes `#root` left, moving the header clear.
-  const collapsed = state === undefined || !state.panelOpen
+  const collapsed = RIGHT_PANEL_ENABLED
+    ? state === undefined || !state.panelOpen
+    : !narrow
   useEffect(() => {
     if (collapsed) document.body.setAttribute('data-dsh-sidebar-collapsed', '')
     else document.body.removeAttribute('data-dsh-sidebar-collapsed')
@@ -555,6 +585,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   const listBaselineRef = useRef<SidebarSessionList | undefined>(undefined)
   const autoOpenPendingRef = useRef<{ baseline: SidebarSessionList; timer: number } | null>(null)
   useEffect(() => {
+    if (!RIGHT_PANEL_ENABLED) return
     const prev = listBaselineRef.current
     listBaselineRef.current = sessionList
     if (sessionId === undefined || prev === undefined) return
@@ -594,6 +625,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
    */
   const jobBaselineRef = useRef<SidebarSessionList | undefined>(undefined)
   useEffect(() => {
+    if (!RIGHT_PANEL_ENABLED) return
     const prev = jobBaselineRef.current
     jobBaselineRef.current = sessionList
     if (sessionId === undefined || prev === undefined) return
@@ -618,6 +650,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
    */
   const subagentJumpRef = useRef<string | undefined>(undefined)
   useEffect(() => {
+    if (!RIGHT_PANEL_ENABLED) return
     const pending = subagentJumpRef.current
     if (pending === undefined || sessionId !== pending) return
     subagentJumpRef.current = undefined
@@ -646,6 +679,13 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   // first-paint fallback.
   const centerRectRef = useRef({ left: 0, right: 0 })
   const [centerMeasured, setCenterMeasured] = useState(false)
+  // The corner toggle follows the CONVERSATION column's right edge, not the
+  // viewport's: DSH's native right sidebar owns the viewport corner while it
+  // is open (it has its own Split / Fullscreen / Collapse controls there, and
+  // the user can resize it by dragging its handle). Writing the measured
+  // inset keeps the bottom-panel toggle out of that header without guessing a
+  // width — same direct-DOM pattern as the bottom panel edges below.
+  const clusterRef = useRef<HTMLDivElement | null>(null)
   // Refs keep the measure step stable across renders and let it skip work
   // mid-drag: during a width/corner drag the layout push resizes the center
   // column every frame, and reacting (setCenterRect → re-render) would
@@ -672,10 +712,42 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     // one-shot measured flip renders the panel visible once (a stale
     // {0,0} fallback would flash full-width).
     centerRectRef.current = { left: rect.left, right: rect.right }
+    const cluster = clusterRef.current
+    if (cluster !== null) {
+      // With the native right sidebar closed, sit 4px to the right of its
+      // header toggle (the app's rightmost header button) so the two read as
+      // one tray row — measured, not hardcoded, because skins/padding move
+      // that button. While the sidebar is open it owns the corner controls,
+      // so the toggle parks at the conversation column's right edge instead
+      // (10px gutter, aligned with the bottom panel's own right edge).
+      let gutter = window.innerWidth - rect.right + 10
+      if (document.querySelector('[data-slot="sidebar.right.pane.tab"]') === null) {
+        let anchor: HTMLElement | null = null
+        for (const button of document.querySelectorAll<HTMLElement>('header button')) {
+          const box = button.getBoundingClientRect()
+          if (box.width === 0 || box.height === 0 || box.bottom > 44 || box.right > window.innerWidth) continue
+          if (anchor === null || box.right > anchor.getBoundingClientRect().right) anchor = button
+        }
+        if (anchor !== null) gutter = window.innerWidth - anchor.getBoundingClientRect().right - 4 - 28
+      }
+      cluster.style.setProperty('right', `${gutter}px`)
+    }
+    // Dock the bottom panel under the native right Sidebar when it is open:
+    // the panel occupies that column's bottom slice and the native column
+    // yields the same height (layout.css), so the file tree ends above the
+    // terminal. Without a native column it keeps the conversation-bottom
+    // placement and its squeeze.
+    const rightPanel = document.querySelector<HTMLElement>('[data-sidebar-right-panel="push"][data-sidebar-right-open="true"]')
+    const docked = rightPanel !== null && bottomOpenRef.current && !narrowRef.current
+    if (rightPanel !== null) dockLeftRef.current = rightPanel.getBoundingClientRect().left
+    if (docked !== dockRightRef.current) {
+      dockRightRef.current = docked
+      setDockRight(docked)
+    }
     const bottom = bottomRef.current
     if (bottom !== null) {
-      bottom.style.setProperty('left', `${rect.left}px`)
-      bottom.style.setProperty('right', `${window.innerWidth - rect.right}px`)
+      bottom.style.setProperty('left', `${docked ? dockLeftRef.current : rect.left}px`)
+      bottom.style.setProperty('right', `${docked ? 0 : window.innerWidth - rect.right}px`)
     }
     setCenterMeasured(prev => (prev ? prev : true))
   }, [])
@@ -694,9 +766,21 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     // (observed: a 1px sliver at the viewport's left edge).
     const locate = (): void => {
       if (disposed) return
-      const col = document.querySelector('#root [data-slot="conversation"]')
-        ?.parentElement as HTMLElement | undefined
-      if (col === undefined || !col.isConnected) {
+      // 0.1 names the root conversation slot `conversation`; 0.2 renamed it
+      // to `main.conversation` and wraps it in another display:contents
+      // anchor (`[data-slot="main"]`). Walk up to the first ancestor with a
+      // real box — that is the AppFrame's center column (`.centerCol`), not
+      // a zero-size slot anchor.
+      const slot = document.querySelector('#root [data-slot="main.conversation"]')
+        ?? document.querySelector('#root [data-slot="conversation"]')
+      let col = slot?.parentElement as HTMLElement | null | undefined
+      while (col !== null && col !== undefined && col !== document.body) {
+        const rect = col.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) break
+        col = col.parentElement as HTMLElement | null
+      }
+      if (col === document.body) col = null
+      if (col === undefined || col === null || !col.isConnected) {
         if (centerColRef.current !== null) {
           centerColRef.current = null
           observer?.disconnect()
@@ -947,8 +1031,13 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     // width (innerWidth - state.width - detailsWidth), so this equals
     // `width + detailsWidth` — derived from the measured column, keeping the
     // drag write-only (no React re-render mid-drag).
-    bottomRef.current?.style.setProperty('right', `${(window.innerWidth - centerRectRef.current.right) + (width - (state?.width ?? 0))}px`)
-    const bottomPush = !narrow && state?.bottomOpen === true ? height + keyboardInset : 0
+    if (dockRightRef.current) {
+      bottomRef.current?.style.setProperty('right', '0px')
+      document.documentElement.style.setProperty('--dsh-bottom-dock-height', `${height}px`)
+    } else {
+      bottomRef.current?.style.setProperty('right', `${(window.innerWidth - centerRectRef.current.right) + (width - (state?.width ?? 0))}px`)
+    }
+    const bottomPush = !narrow && !dockRightRef.current && state?.bottomOpen === true ? height + keyboardInset : 0
     writeGeometry(width, bottomPush)
   }
 
@@ -1078,7 +1167,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       const last = lastDragSize.current
       const { width: adoptedWidth, height: adoptedHeight } = layoutPushSize({
         narrow,
-        panelOpen: state?.panelOpen === true,
+        panelOpen: RIGHT_PANEL_ENABLED && state?.panelOpen === true,
         bottomOpen: state?.bottomOpen === true,
         width: last?.width ?? state?.width ?? 0,
         bottomHeight: last?.height ?? state?.bottomHeight ?? 0,
@@ -1103,18 +1192,50 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   useEffect(() => {
     const { width, height } = layoutPushSize({
       narrow,
-      panelOpen: snapshot.state?.panelOpen === true,
+      panelOpen: RIGHT_PANEL_ENABLED && snapshot.state?.panelOpen === true,
       bottomOpen: snapshot.state?.bottomOpen === true,
       width: snapshot.state?.width ?? 0,
       bottomHeight: snapshot.state?.bottomHeight ?? 0,
       viewportWidth: viewport.width,
       viewportHeight: layoutViewportHeight,
     })
-    const bottomPush = !narrow && snapshot.state?.bottomOpen === true
+    const bottomPush = !narrow && !dockRight && snapshot.state?.bottomOpen === true
       ? height + keyboardInset
       : 0
     writeGeometry(width, bottomPush)
-  }, [narrow, snapshot.state?.panelOpen, snapshot.state?.width, snapshot.state?.bottomOpen, snapshot.state?.bottomHeight, viewport.width, layoutViewportHeight, keyboardInset])
+  }, [narrow, dockRight, snapshot.state?.panelOpen, snapshot.state?.width, snapshot.state?.bottomOpen, snapshot.state?.bottomHeight, viewport.width, layoutViewportHeight, keyboardInset])
+
+  // While docked, the native right Sidebar yields exactly the bottom panel's
+  // height: `bottom` on its absolute panel (layout.css) lifts the column's
+  // content above the terminal. The height rides a variable so a height drag
+  // updates both edges in the same frame (applyDrag writes it directly).
+  useEffect(() => {
+    const open = dockRight && snapshot.state?.bottomOpen === true
+    if (!open) {
+      document.body.removeAttribute('data-dsh-bottom-docked')
+      document.documentElement.style.removeProperty('--dsh-bottom-dock-height')
+      return
+    }
+    const { height } = layoutPushSize({
+      narrow,
+      panelOpen: false,
+      bottomOpen: true,
+      width: 0,
+      bottomHeight: snapshot.state?.bottomHeight ?? 0,
+      viewportWidth: viewport.width,
+      viewportHeight: layoutViewportHeight,
+    })
+    document.body.setAttribute('data-dsh-bottom-docked', '')
+    document.documentElement.style.setProperty('--dsh-bottom-dock-height', `${height}px`)
+    return () => {
+      document.body.removeAttribute('data-dsh-bottom-docked')
+      document.documentElement.style.removeProperty('--dsh-bottom-dock-height')
+    }
+  }, [dockRight, narrow, snapshot.state?.bottomOpen, snapshot.state?.bottomHeight, viewport.width, layoutViewportHeight])
+
+  // Opening/closing the bottom panel does not always resize the center
+  // column, so re-run the dock decision explicitly on that transition.
+  useEffect(() => { measureCenter() }, [measureCenter, snapshot.state?.bottomOpen])
   // Unmount must release the push (issue #31): when the boundary swaps the
   // whole sidebar after a render crash (or the plugin fiber is disposed /
   // HMR), the CSS variables would otherwise stay on <html> and layout.css
@@ -1140,6 +1261,11 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
 
 
   const actions: WorkbenchActions = useMemo(() => ({
+    renameTab: (tabId, title) => {
+      // Retitle through the service so the change is recorded in the tab
+      // state (and therefore persisted per session like any other edit).
+      ctx.get('betterSidebar')?.updateTab(tabId, { title })
+    },
     closeTab: (paneId, tabId) => {
       // A closed terminal releases its pty immediately — including when its
       // socket is mid-reconnect, where the unmount close frame never reaches
@@ -1224,7 +1350,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
     // focus is the only way the existing Tooltip can explain what is missing.
     return (
       <div data-dsh-panel-host {...osFileDragShield}>
-        <div className={css.toggleCluster} data-dsh-toggle-cluster>
+        <div ref={clusterRef} className={css.toggleCluster} data-dsh-toggle-cluster>
           {!narrow && (
             <Tooltip label={t('noSession')} side="bottom" delayMs={500}>
               <button type="button" className={css.toggleButton} aria-disabled="true" aria-label={t('noSession')}>
@@ -1232,11 +1358,6 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
               </button>
             </Tooltip>
           )}
-          <Tooltip label={t('noSession')} side="bottom" delayMs={500}>
-            <button type="button" className={css.toggleButton} aria-disabled="true" aria-label={t('noSession')}>
-              <IconPanelRightOutline16 />
-            </button>
-          </Tooltip>
         </div>
       </div>
     )
@@ -1244,7 +1365,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
 
   const bottomPanelHeight = layoutPushSize({
     narrow,
-    panelOpen: state.panelOpen,
+    panelOpen: RIGHT_PANEL_ENABLED && state.panelOpen,
     // Keep the hidden panel's geometry ready for its slide-in transition;
     // only the layout push itself becomes zero while it is closed.
     bottomOpen: true,
@@ -1327,7 +1448,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
           ? true
           : placement === 'bottom'
             ? state.bottomOpen && active
-            : state.panelOpen && active
+            : RIGHT_PANEL_ENABLED && state.panelOpen && active
       }
       onSubagentJump={(childSessionId) => { subagentJumpRef.current = childSessionId }}
       onOpenDiff={(diffTab) => { store.reduce(s => openDiffTab(s, paneId, diffTab)) }}
@@ -1339,14 +1460,12 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
   return (
     <div data-dsh-panel-host {...osFileDragShield}>
       {/*
-        The persistent toggle cluster at the top-right corner: the bottom
-        panel's button (bottom glyph) LEFT of the right panel's (side glyph).
-        Always pinned to the viewport corner — inside the right panel's
-        top-right while it is open, sitting flush in the tab strip whose
-        right end it really squeezes (the strip reserves its width via CSS),
-        so the tabs genuinely yield space to it.
+        The persistent toggle cluster at the top-right corner: only the
+        bottom panel's button is left (the side workbench is retired in
+        favour of DSH's native right sidebar). Always pinned to the viewport
+        corner; the session header reserves its width via CSS.
       */}
-      <div className={css.toggleCluster} data-dsh-toggle-cluster>
+      <div ref={clusterRef} className={css.toggleCluster} data-dsh-toggle-cluster>
         {/*
           Narrow viewports merge the two workbenches into the one drawer —
           there is no bottom panel, so its toggle button is not offered.
@@ -1363,16 +1482,6 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
             </button>
           </Tooltip>
         )}
-        <Tooltip label={state.panelOpen ? t('collapse') : t('expand')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={css.toggleButton}
-            aria-label={state.panelOpen ? t('collapse') : t('expand')}
-            onClick={() => { store.reduce(togglePanel) }}
-          >
-            <IconPanelRightOutline16 />
-          </button>
-        </Tooltip>
       </div>
       {/*
         The right panel stays mounted while collapsed (hidden off-screen) so
@@ -1385,7 +1494,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       */}
       <div
         ref={panelRef}
-        className={clsx(css.panel, !state.panelOpen && css.panelHidden)}
+        className={clsx(css.panel, (!RIGHT_PANEL_ENABLED || !state.panelOpen) && css.panelHidden)}
         data-dsh-panel
         style={{
           width: narrow ? '100vw' : Math.min(state.width, window.innerWidth),
@@ -1456,7 +1565,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
           coordinates to keep in sync. (Never on narrow viewports: the
           bottom panel does not exist there.)
         */}
-        {!narrow && state.panelOpen && state.bottomOpen && (
+        {RIGHT_PANEL_ENABLED && !narrow && state.panelOpen && state.bottomOpen && (
           <div
             className={css.cornerHandle}
             data-dragging={draggingCorner || undefined}
@@ -1521,20 +1630,19 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
         data-dsh-bottom-panel
         style={{
           height: bottomPanelHeight,
-          left: centerRectRef.current.left,
+          // Docked under the native right Sidebar: fill that column's slice.
+          // Otherwise span ONLY the center column, ending exactly at the
+          // details column's left edge (the right panel's margin-right push
+          // is already baked into centerRect.right).
+          left: dockRight ? dockLeftRef.current : centerRectRef.current.left,
           // Keep the panel above the on-screen keyboard when the visual
           // viewport shrinks (see the keyboardInset effect).
           bottom: keyboardInset > 0 ? `${keyboardInset}px` : undefined,
-          // Direct from the center column's measured right edge: the bottom
-          // panel spans ONLY the center column, ending exactly at the
-          // details column's left edge (the details column sits between the
-          // center and the right panel, and the right panel's margin-right
-          // push is already baked into centerRect.right).
-          right: window.innerWidth - centerRectRef.current.right,
+          right: dockRight ? 0 : window.innerWidth - centerRectRef.current.right,
           // The seam against the open right panel needs its own hairline
           // (the right panel's border-left alone is covered by this panel's
           // fill — without it the corner looks cut off).
-          borderRight: state.panelOpen ? '1px solid var(--dsw-alias-border-l2)' : undefined,
+          borderRight: RIGHT_PANEL_ENABLED && state.panelOpen ? '1px solid var(--dsw-alias-border-l2)' : undefined,
           // Unmeasured center column → keep the panel invisible (zero-size
           // geometry would flash full-width overflow instead).
           visibility: centerMeasured ? undefined : 'hidden',
@@ -1585,7 +1693,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
             aria-label={t('collapseBottomPanel')}
             onClick={() => { store.reduce(toggleBottomPanel) }}
           >
-            <IconCloseFill14 />
+            <IconCloseFillRegular />
           </button>
         </Tooltip>
         <div className={css.panelBody}>
@@ -1610,7 +1718,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
         collapse. The floats array's order is the stacking order; the content
         reuses the regular tab renderer, so every tab type floats unchanged.
       */}
-      {state.floats.map(float => (
+      {RIGHT_PANEL_ENABLED && state.floats.map(float => (
         <FreeWindow
           key={float.id}
           float={float}

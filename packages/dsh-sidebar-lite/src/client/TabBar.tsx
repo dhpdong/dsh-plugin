@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  IconCloseFill14, IconPlusOutline16, Menu,
+  IconCloseFillRegular, IconPlusOutlineRegular, Menu,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SidebarTab } from './state.ts'
 import { t } from './locales.ts'
@@ -67,6 +67,8 @@ export function TabBar(props: {
   /** Float a tab out as a free window (the tab context menu's entry; the
    *  drag-to-conversation gesture is handled at the Sidebar shell level). */
   onFloatTab: (tabId: string) => void
+  /** Retitle one tab (the tab context menu's rename entry). */
+  onRenameTab: (tabId: string, title: string) => void
   /** Icon resolver for tab labels (reads from the tab descriptor registry). */
   getTabIcon?: (tab: SidebarTab) => ReactNode
   /** Badge resolver for tab labels (reads the descriptor's `badge`; the
@@ -74,7 +76,7 @@ export function TabBar(props: {
   getTabBadge?: (tab: SidebarTab) => ReactNode
 }) {
   const {
-    paneId, tabs, active, onActivate, onClose, onNewTab, newTabOptions, onDropTab, onFloatTab, getTabIcon, getTabBadge,
+    paneId, tabs, active, onActivate, onClose, onNewTab, newTabOptions, onDropTab, onFloatTab, onRenameTab, getTabIcon, getTabBadge,
   } = props
   const [menuOpen, setMenuOpen] = useState(false)
   // The tab right-click context menu: the target tab plus the cursor
@@ -227,7 +229,7 @@ export function TabBar(props: {
                 onClose(tab.id)
               }}
             >
-              <IconCloseFill14 />
+              <IconCloseFillRegular />
             </button>
           </div>
         ))}
@@ -257,9 +259,21 @@ export function TabBar(props: {
               className={css.tabBarPlus}
               aria-label={t('newTab')}
               title={t('newTab')}
-              onClick={() => { setMenuOpen(v => !v); setTabMenu(null) }}
+              onClick={() => {
+                // One enabled type means there is nothing to choose: create it
+                // straight away instead of opening a one-row menu.
+                const only = newTabOptions.length === 1 ? newTabOptions[0] : undefined
+                if (only !== undefined && only.disabled !== true) {
+                  setMenuOpen(false)
+                  setTabMenu(null)
+                  onNewTab(only.id)
+                  return
+                }
+                setMenuOpen(v => !v)
+                setTabMenu(null)
+              }}
             >
-              <IconPlusOutline16 />
+              <IconPlusOutlineRegular />
             </button>
           )}
         />
@@ -275,6 +289,7 @@ export function TabBar(props: {
           open={tabMenu !== null && tabMenuIndex >= 0}
           onClose={() => { setTabMenu(null) }}
           items={[
+            { id: 'rename', label: t('renameTab') },
             { id: 'float', label: t('moveToFreeWindow') },
             { id: 'close', label: t('close') },
             { id: 'closeOthers', label: t('closeOtherTabs'), ...(tabs.length <= 1 ? { disabled: true } : {}) },
@@ -287,7 +302,11 @@ export function TabBar(props: {
             setTabMenu(null)
             const index = tabs.findIndex(tab => tab.id === target.tabId)
             if (index < 0) return
-            if (id === 'float') {
+            if (id === 'rename') {
+              const current = tabs[index]
+              const next = window.prompt(t('renameTab'), current?.title ?? '')
+              if (next !== null && next.trim() !== '') onRenameTab(target.tabId, next.trim())
+            } else if (id === 'float') {
               onFloatTab(target.tabId)
             } else if (id === 'close') {
               onClose(target.tabId)

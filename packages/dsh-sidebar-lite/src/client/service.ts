@@ -275,6 +275,12 @@ export interface FileViewerProps {
   /** Internal: the viewer registers its toolbar commands on mount (null on
    *  unmount). */
   onToolbarControls?: (controls: EditorToolbarControls | null) => void
+  /** Auto-save a dirty draft after a short idle pause (merged editor panes). */
+  autoSave?: boolean
+  /** Initial markdown/html mode; defaults to 'preview'. */
+  initialMode?: 'preview' | 'edit'
+  /** Wrap long lines (default true); false leaves one visual line per source line and scrolls horizontally. */
+  lineWrapping?: boolean
 }
 
 /** The toolbar state a text editor reports to the host's merged-mode header. */

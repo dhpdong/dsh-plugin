@@ -1,6 +1,6 @@
 /**
- * tsdown build for dsh-sidebar-lite: the host-half lib (lib/index.js and
- * the lib/invariant.js companion, ESM node) plus the two browser client
+ * tsdown build for dsh-sidebar-lite: the host-half lib (lib/index.js, ESM
+ * node) plus the two browser client
  * bundles (lib/client.js and lib/client-registry.js, CJS closure factory) —
  * one per install channel:
  *
@@ -64,7 +64,6 @@ const CLIENT_EXTERNALS = [
   'cordis',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
 ]
 
 /**
@@ -329,7 +328,7 @@ const CHUNKS = ['terminal', 'editor', 'mermaid']
 
 export default [
   {
-    entry: { index: 'src/index.ts', invariant: 'src/invariant.ts' },
+    entry: { index: 'src/index.ts' },
     outDir: 'lib',
     format: ['esm'],
     platform: 'node',

@@ -51,6 +51,13 @@ export interface SidebarConfig {
   /** How long a disconnected terminal process survives awaiting a reconnect. */
   reconnectGraceMs?: number
   /**
+   * Lift the workspace fence so every fs route accepts absolute paths outside
+   * the session workspace. `dsh-native-file-ops` turns this on for its global
+   * file browser (any folder, shared by every workspace). Default false keeps
+   * every route workspace-confined.
+   */
+  allowOutsideWorkspace?: boolean
+  /**
    * Terminal shell (absolute path or bare executable name) for BOTH the UI
    * terminal tabs and the model-facing `terminal_*` tools. Empty = auto:
    * POSIX follows `$SHELL` then the account login shell; Windows follows
@@ -76,6 +83,7 @@ export const Config: z<SidebarConfig> = z.object({
   listLimit: z.number().step(1).min(1).default(1000),
   terminalsPerSession: z.number().step(1).min(1).default(3),
   reconnectGraceMs: z.number().step(1).min(0).default(30_000),
+  allowOutsideWorkspace: z.boolean().default(false),
   shell: z.string().default(''),
   shellArgs: z.array(z.string()).default([]),
 })
@@ -88,6 +96,8 @@ export interface ResolvedSidebarConfig {
   listLimit: number
   terminalsPerSession: number
   reconnectGraceMs: number
+  /** Whether fs routes accept absolute paths outside the session workspace. */
+  allowOutsideWorkspace: boolean
   /** The configured terminal shell; empty means the host auto-resolves it. */
   shell: string
   /** Explicit shell arguments; empty means use the platform defaults. */
@@ -108,6 +118,7 @@ export function resolveSidebarConfig(config: SidebarConfig | undefined): Resolve
     listLimit: config?.listLimit ?? 1000,
     terminalsPerSession: config?.terminalsPerSession ?? 3,
     reconnectGraceMs: config?.reconnectGraceMs ?? 30_000,
+    allowOutsideWorkspace: config?.allowOutsideWorkspace ?? false,
     shell: config?.shell?.trim() ?? '',
     shellArgs: config?.shellArgs ?? [],
   }

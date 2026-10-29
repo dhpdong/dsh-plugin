@@ -13,9 +13,14 @@
  * session's authoritative cwd comes from the session store, and terminal
  * processes are keyed by session.
  */
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join } from 'node:path'
-import type { IncomingMessage } from 'node:http'
+import { createReadStream } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import type { Writable } from 'node:stream'
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { Context, SidebarHttpRequest } from './context-types.ts'
@@ -31,7 +36,7 @@ import {
 } from './config.ts'
 import { parentOf, requireAbsolute, listDirectory, rootLabel } from './fs-tree.ts'
 import { createWorkspaceEntry, trashWorkspacePath, writeWorkspaceUpload } from './fs-operations.ts'
-import { ensureWorkspacePath, ensureWorkspaceWritePath } from './path-security.ts'
+import { ensureWorkspacePath, ensureWorkspaceWritePath, setOutsideWorkspaceAllowed } from './path-security.ts'
 import { searchFiles } from './fs-search.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
@@ -39,7 +44,7 @@ import { isTrustedApiRequest, isLoopbackHostname } from './trust-fence.ts'
 import { registerBundleRoute } from './bundle-route.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
-import { SettingsConflictError, settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { homedir } from 'node:os'
 import { defaultShell, ensureSpawnHelper, PtyManager, shellDisplayName } from './pty-manager.ts'
 import { AgentPtyRegistry, clampDims, type AgentTerminalHandle } from './agent-pty.ts'
 import {
@@ -77,7 +82,7 @@ export type {
 export const name = 'dsh-sidebar-lite'
 
 /** Services required before mounting: the webserver routes, the session store, the web runtime's trusted hosts, and the tool registry. */
-export const inject = ['webServer', 'sessions', 'webRuntime', 'tools']
+export const inject = ['webServer', 'sessions', 'webStartup', 'tools']
 
 /** Content types for the media route, by extension. */
 const MEDIA_TYPES: Record<string, string> = {
@@ -219,6 +224,98 @@ export interface SidebarSettingsFace {
   update(patch: Record<string, unknown>, expectedRevision?: number): Promise<{ value?: unknown; revision?: number }>
 }
 
+/** Refusal to overwrite side-card preferences changed since the form read them. */
+export class SidebarPrefsConflictError extends Error {
+  /** Stable machine code the route maps back to `settings-conflict`. */
+  readonly code = 'SETTINGS_CONFLICT'
+  /**
+   * @param message - human-readable conflict detail.
+   */
+  constructor(message: string) {
+    super(message)
+    this.name = 'SidebarPrefsConflictError'
+  }
+}
+
+/** The side-card preference document (defaults, JSON file, revision guard). */
+interface SidebarPrefsStore {
+  load(): Promise<void>
+  get(): SidebarPrefs
+  view(): { value: SidebarPrefs; revision: number }
+  update(patch: Record<string, unknown>, expectedRevision?: number): Promise<{ value: SidebarPrefs; revision: number }>
+  watch(callback: (next: SidebarPrefs, prev: SidebarPrefs) => void | Promise<void>): () => void
+}
+
+/**
+ * Build the file-backed side-card preference store. DSH 0.2 replaced the
+ * user-settings namespace registry with configuration forms, so a plugin's
+ * own preferences are its own document: one small JSON file under the DSH
+ * home, validated by {@link PrefsSchema} and revisioned exactly like the old
+ * settings seam so a stale editor is refused instead of silently winning.
+ * @param path - absolute path of the preference document.
+ * @param onError - optional warning sink for unreadable/unwritable files.
+ * @returns the store.
+ */
+function createPrefsStore(path: string, onError?: (message: string) => void): SidebarPrefsStore {
+  let prefs: SidebarPrefs = { ...SIDEBAR_PREFS_DEFAULTS }
+  let revision = 0
+  let loaded = false
+  let loading: Promise<void> | undefined
+  const listeners = new Set<(next: SidebarPrefs, prev: SidebarPrefs) => void | Promise<void>>()
+  const notify = (next: SidebarPrefs, prev: SidebarPrefs): void => {
+    for (const listener of [...listeners]) {
+      try { void listener(next, prev) }
+      catch (error) { onError?.(`prefs listener failed: ${error instanceof Error ? error.message : String(error)}`) }
+    }
+  }
+  const store: SidebarPrefsStore = {
+    load: () => {
+      if (loaded) return Promise.resolve()
+      loading ??= (async () => {
+        try {
+          const raw: unknown = JSON.parse(await readFile(path, 'utf8'))
+          const next = PrefsSchema(raw as SidebarPrefs)
+          const prev = prefs
+          prefs = next
+          notify(next, prev)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            onError?.(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        } finally {
+          loaded = true
+        }
+      })()
+      return loading
+    },
+    get: () => prefs,
+    view: () => ({ value: prefs, revision }),
+    update: async (patch, expectedRevision) => {
+      await store.load()
+      if (expectedRevision !== undefined && expectedRevision !== revision) {
+        throw new SidebarPrefsConflictError(
+          `settings "${SIDEBAR_PREFS_NS}" changed since it was read (expected revision ${expectedRevision}, now ${revision})`,
+        )
+      }
+      const next = PrefsSchema({ ...prefs, ...patch })
+      await mkdir(dirname(path), { recursive: true })
+      const temp = `${path}.${process.pid}.${Date.now()}.tmp`
+      await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+      await rename(temp, path)
+      const prev = prefs
+      prefs = next
+      revision += 1
+      notify(next, prev)
+      return store.view()
+    },
+    watch: (callback) => {
+      listeners.add(callback)
+      return () => { listeners.delete(callback) }
+    },
+  }
+  return store
+}
+
 /** Build the API method table bound to the plugin context, pty manager, agent pty registry, resolved config, and effective terminal shell. */
 /**
  * Resolve the settings-page terminal shell overrides (the terminal card's
@@ -227,6 +324,22 @@ export interface SidebarSettingsFace {
  * runtime complement to the boot-time yaml — same contract, later binding:
  * the values here win for terminals opened afterwards.
  */
+/** The DSH home: `$DSH_HOME` or `~/.dsh` (same precedence as dsh-home-paths). */
+function dshHome(): string {
+  const configured = process.env.DSH_HOME
+  return configured !== undefined && configured.trim() !== '' ? configured.trim() : join(homedir(), '.dsh')
+}
+
+/** The deployment's accepted non-loopback authorities: explicit
+ * `--trusted-host` values plus the listener's own bind address (0.2 moved
+ * the bind-derived trust list from `webRuntime` onto `webStartup` + the
+ * webServer bind facts). */
+function trustedHostsOf(ctx: Context): readonly string[] {
+  const explicit = ctx.webStartup?.trustedHosts ?? []
+  const bindHost = ctx.webServer?.host
+  return bindHost === undefined || bindHost === '' ? explicit : [...explicit, bindHost]
+}
+
 function shellOverridesOf(getSettings: () => SidebarSettingsFace | undefined): { shell?: string; shellArgs?: string[] } {
   const settings = getSettings()
   const value = settings?.get().value
@@ -351,6 +464,63 @@ function buildApi(
       const path = requireString(payload, 'path')
       await trashWorkspacePath(cwd, path)
       return { ok: true }
+    },
+
+    // Native right-Sidebar file-tree operations (dsh-native-file-ops): the
+    // native rows carry absolute workspace paths, so these reuse the same
+    // symlink-safe guards every other fs method above uses.
+    'fs.rename': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      const source = await ensureWorkspacePath(cwd, requireString(payload, 'path'))
+      const name = requireString(payload, 'newName')
+      if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || name.includes('\0')) {
+        throw new SidebarError('bad-request', 'invalid name', 400)
+      }
+      if (name === basename(source)) return { path: source }
+      const target = await ensureWorkspaceWritePath(cwd, join(dirname(source), name))
+      await rename(source, target).catch((error: unknown) => {
+        throw new SidebarError('fs-error', `cannot rename "${source}": ${error instanceof Error ? error.message : String(error)}`, 400)
+      })
+      return { path: target }
+    },
+    // Flat manifest of one directory tree for browser-side folder download:
+    // File System Access writes each file into a user-picked directory, so the
+    // client needs the list up front. Symlinks are skipped (never followed out
+    // of the workspace); the walk is bounded to keep a runaway tree harmless.
+    'fs.manifest': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      const root = await ensureWorkspacePath(cwd, requireString(payload, 'path'))
+      const entries: Array<{ path: string; type: 'file' | 'directory' }> = []
+      const walk = async (dir: string): Promise<void> => {
+        for (const item of await readdir(dir, { withFileTypes: true })) {
+          if (entries.length >= 50_000) return
+          const absolute = join(dir, item.name)
+          const rel = relative(root, absolute).split(sep).join('/')
+          if (item.isSymbolicLink()) continue
+          if (item.isDirectory()) {
+            entries.push({ path: rel, type: 'directory' })
+            await walk(absolute)
+          } else if (item.isFile()) {
+            entries.push({ path: rel, type: 'file' })
+          }
+        }
+      }
+      await walk(root)
+      return { name: basename(root), entries }
+    },
+    'fs.move': async (payload) => {
+      const { cwd } = cwdOf(payload)
+      const source = await ensureWorkspacePath(cwd, requireString(payload, 'from'))
+      const dir = await ensureWorkspacePath(cwd, requireString(payload, 'toDir'))
+      const target = await ensureWorkspaceWritePath(cwd, join(dir, basename(source)))
+      if (target === source) return { path: source }
+      if (target.startsWith(source + sep)) {
+        throw new SidebarError('bad-request', 'cannot move a folder into itself', 400)
+      }
+      await rename(source, target).catch((error: unknown) => {
+        throw new SidebarError('fs-error', `cannot move "${source}": ${error instanceof Error ? error.message : String(error)}`, 400)
+      })
+      return { path: target }
     },
     'git.worktrees': async (payload) => {
       const { cwd } = await gitCwdOf(payload)
@@ -495,7 +665,7 @@ function buildApi(
     'settings.update': async (payload) => {
       const settings = getSettings()
       if (settings === undefined) {
-        throw new SidebarError('settings-rejected', 'the settings service is not mounted in this deployment', 503)
+        throw new SidebarError('settings-rejected', 'the side-card preferences are unavailable', 503)
       }
       const record = payload as { patch?: unknown; expectedRevision?: unknown } | null
       const patch = record?.patch
@@ -506,7 +676,7 @@ function buildApi(
       try {
         return await settings.update(patch as Record<string, unknown>, expectedRevision)
       } catch (error) {
-        if (error instanceof SettingsConflictError) {
+        if (error instanceof SidebarPrefsConflictError) {
           throw new SidebarError('settings-conflict', error.message, 409)
         }
         throw new SidebarError('settings-rejected', error instanceof Error ? error.message : String(error), 400)
@@ -619,11 +789,85 @@ function buildApi(
  * {@link Config} and fills defaults, direct callers get them from
  * {@link resolveSidebarConfig}.
  */
+/**
+ * Zip one workspace directory into the response, code-server style: a real
+ * streaming archive with the folder as its root entry. Uses the platform zip
+ * (Info-ZIP on POSIX, Compress-Archive on Windows) so no npm dependency enters
+ * the host module graph.
+ * @param path - absolute directory to archive.
+ * @param res - response that receives the zip bytes.
+ */
+async function streamZip(path: string, res: ServerResponse): Promise<void> {
+  const name = basename(path)
+  const headers = {
+    'content-type': 'application/zip',
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(`${name}.zip`)}`,
+    'cache-control': 'no-cache',
+  }
+  if (process.platform !== 'win32') {
+    const child = spawn('zip', ['-r', '-q', '-', name], { cwd: dirname(path), stdio: ['ignore', 'pipe', 'ignore'] })
+    let started = false
+    let settled = false
+    const fail = (message: string): void => {
+      if (settled) return
+      settled = true
+      if (!started) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: { code: 'fs-error', message } }))
+      } else {
+        (res as unknown as { destroy(): void }).destroy()
+      }
+    }
+    // Headers are written only after the process actually spawned: a missing
+    // `zip` binary must fail as a clean 500, never as a 200 whose empty body
+    // the browser saves as a corrupt .zip. From there the archive streams.
+    await new Promise<void>((resolve) => {
+      child.once('error', (error) => {
+        fail(`zip unavailable: ${error.message}`)
+        resolve()
+      })
+      child.once('spawn', () => {
+        started = true
+        res.writeHead(200, headers)
+        child.stdout.pipe(res as unknown as Writable)
+      })
+      child.once('close', () => {
+        settled = true
+        resolve()
+      })
+    })
+    return
+  }
+  const tmp = join(tmpdir(), `dsh-sidebar-${randomUUID()}.zip`)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Compress-Archive -LiteralPath '${path.replace(/'/g, "''")}' -DestinationPath '${tmp.replace(/'/g, "''")}' -Force`,
+      ], { stdio: 'ignore' })
+      child.once('error', reject)
+      child.once('close', (code) => (code === 0 ? resolve() : reject(new Error(`Compress-Archive exited ${String(code)}`))))
+    })
+    const info = await stat(tmp)
+    res.writeHead(200, { ...headers, 'content-length': String(info.size) })
+    const stream = createReadStream(tmp)
+    stream.on('error', () => (res as unknown as { destroy(): void }).destroy())
+    stream.on('close', () => { void rm(tmp, { force: true }) })
+    stream.pipe(res as unknown as Writable)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
 export function apply(ctx: Context, config?: SidebarConfig): void {
   // pnpm strips the executable bit from node-pty's prebuilt spawn-helper;
   // restore it before any terminal can spawn (idempotent).
   ensureSpawnHelper()
   const resolved = resolveSidebarConfig(config)
+  // Global file browser: the fence can be lifted for the whole fs surface so
+  // the file panel can browse any directory (see config.allowOutsideWorkspace).
+  setOutsideWorkspaceAllowed(resolved.allowOutsideWorkspace)
   // One shell resolution feeds BOTH terminal surfaces: the UI tabs and the
   // model-facing terminal_* tools. They must stay in lockstep, otherwise a
   // configured shell fixes one surface and silently leaves the other on the
@@ -633,7 +877,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   // plus --trusted-host authorities) — the authoritative source the /api
   // gateway fence derives its list from. Read per request from the live
   // service value; a replaced list takes effect without a plugin restart.
-  const fence = (req: SidebarHttpRequest): boolean => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts)
+  const fence = (req: SidebarHttpRequest): boolean => isTrustedApiRequest(req, trustedHostsOf(ctx))
   // node-pty is loaded lazily, never at module top level (issue #140): a
   // missing or broken install must degrade THIS plugin — terminal tab shows
   // a repair command, agent terminal tools stay unregistered — instead of
@@ -664,110 +908,55 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   const agentOpenRegistry = new AgentOpenRegistry()
 
   // ── User-facing "Side card" preferences ──────────────────────────────────
-  // Register the namespace with the settings provider so the Settings page
-  // (client half) can render and persist the new-conversation defaults. The
-  // DSH settings RPC domain (api-proxy) only serves allowlisted namespaces to
-  // configuration clients, so the client reaches this namespace through the
-  // plugin's own fenced routes below ('settings.get'/'settings.update'),
-  // which call the seam in-process. Deployments without a settings service
-  // simply never fill the face and the client falls back to the defaults.
+  // DSH 0.2 replaced the user-settings namespace registry, so the side card
+  // keeps its document in one JSON file under the DSH home. The client
+  // reaches it through the plugin's fenced settings routes, which validate
+  // with PrefsSchema and preserve the old revision guard.
   let settingsFace: SidebarSettingsFace | undefined
-  // The model-facing terminal tools are gated on the side-card setting
-  // `agentTerminalTools` (default off): nothing is injected until the user
-  // turns the feature on, and turning it off mid-session unregisters the
-  // tools and releases the agent terminals they created.
   let toolsDisposers: (() => void) | null = null
-  // The model-facing `sidebar_open` tool is gated the same way (see
-  // syncOpenToolsGate below); separate disposer (no native deps, and turning
-  // the feature off must not release user terminals).
   let openToolsDisposers: (() => void) | null = null
   const syncToolsGate = (scope: { get(): SidebarPrefs }): void => {
     if (scope.get().agentTerminalTools) {
       if (toolsDisposers === null) {
-        // Degraded mode (node-pty unavailable): never register the terminal
-        // tools — every one of them would fail at spawn time.
         if (agentPtyRegistry === null) return
         toolsDisposers = registerTools(ctx, agentPtyRegistry, (sessionId) => sessionCwdOf(ctx, sessionId), () => shellOverridesOf(() => settingsFace))
       }
     } else if (toolsDisposers !== null) {
       toolsDisposers()
       toolsDisposers = null
-      // The feature is off: release every agent terminal the model created
-      // while it was on (they are only reachable through the tools). The
-      // registry change fires the push, so the sidebar reconciles them away.
       agentPtyRegistry?.disposeAll()
     }
   }
-  ctx.inject(['settings'], (sctx) => {
-    const ns: SettingsNamespace = settingsNamespace(SIDEBAR_PREFS_NS)
-    // The structural settings mirror types `schema` as unknown, so the
-    // generic is not inferred here; the real service resolves it from the
-    // schemastery schema (PrefsSchema) — narrow the owner scope explicitly.
-    const scope = sctx.settings.register(ns, PrefsSchema) as {
-      get(): SidebarPrefs
-      watch(callback: (next: SidebarPrefs, prev: SidebarPrefs) => void): () => void
-    }
-    const viewOf = (): { value?: unknown; revision?: number } => {
-      const descriptor = sctx.settings.describe({ redactSecrets: true }).find(candidate => candidate.ns === ns)
-      return descriptor === undefined
-        ? { value: undefined, revision: undefined }
-        : { value: descriptor.value, revision: descriptor.revision }
-    }
-    // Mutual exclusion with the dsh-web-ui family right panel: the aionui
-    // panel's provider choice (`aionui-panel.rightPanel`) is the authority.
-    // While it resolves to 'aionui-panel', this sidebar must not mount. The
-    // namespace is read through the settings seam like any other registered
-    // section; absent namespace (no aionui installed) = not disabled.
-    const externalDisable = (): boolean => {
-      const descriptor = sctx.settings.describe({ redactSecrets: true })
-        .find(candidate => candidate.ns === 'aionui-panel')
-      const value = descriptor?.value as { rightPanel?: unknown } | undefined
-      return value?.rightPanel === 'aionui-panel'
-    }
-    settingsFace = {
-      get: viewOf,
-      externalDisable,
-      update: async (patch, expectedRevision) => {
-        await sctx.settings.update(ns, patch, expectedRevision)
-        return viewOf()
-      },
-    }
-    // Register (or unregister) the terminal tools from the current setting,
-    // and keep them in sync with every settings commit.
-    syncToolsGate(scope)
-    // The model-facing open tool is gated the same way on `agentOpenTools`
-    // (default off): nothing is injected until the user turns the feature
-    // on, and turning it off mid-session unregisters the tool and drops the
-    // queued (undelivered) open requests. Already-delivered opens keep their
-    // tabs — the tools' only lever is the queue, not the rendered state.
-    const syncOpenToolsGate = (): void => {
-      if (scope.get().agentOpenTools) {
-        if (openToolsDisposers === null) {
-          openToolsDisposers = registerOpenTool(
-            ctx,
-            agentOpenRegistry,
-            (sessionId) => sessionCwdOf(ctx, sessionId),
-            () => {
-              const view = settingsFace?.get()
-              const value = view?.value
-              return value !== null && typeof value === 'object'
-                ? value as SidebarPrefs
-                : SIDEBAR_PREFS_DEFAULTS
-            },
-          )
-        }
-      } else if (openToolsDisposers !== null) {
-        openToolsDisposers()
-        openToolsDisposers = null
-        agentOpenRegistry.drainAll()
+  const prefsStore = createPrefsStore(
+    join(dshHome(), 'sidebar-lite', 'prefs.json'),
+    (message) => ctx.logger?.warn(`[dsh-sidebar-lite] ${message}`),
+  )
+  settingsFace = {
+    get: () => prefsStore.view(),
+    // The 0.1 aionui settings namespace has no 0.2 peer; the probe is inert.
+    externalDisable: () => false,
+    update: (patch, expectedRevision) => prefsStore.update(patch, expectedRevision),
+  }
+  syncToolsGate(prefsStore)
+  const syncOpenToolsGate = (): void => {
+    if (prefsStore.get().agentOpenTools) {
+      if (openToolsDisposers === null) {
+        openToolsDisposers = registerOpenTool(
+          ctx,
+          agentOpenRegistry,
+          (sessionId) => sessionCwdOf(ctx, sessionId),
+          () => prefsStore.get(),
+        )
       }
+    } else if (openToolsDisposers !== null) {
+      openToolsDisposers()
+      openToolsDisposers = null
+      agentOpenRegistry.drainAll()
     }
-    syncOpenToolsGate()
-    // ONE watch subscription drives both gates: settings commits re-evaluate
-    // the terminal tools AND the open tool together (each gate is idempotent
-    // and owns its own disposer).
-    scope.watch(() => { syncToolsGate(scope); syncOpenToolsGate() })
-  })
+  }
+  syncOpenToolsGate()
+  prefsStore.watch(() => { syncToolsGate(prefsStore); syncOpenToolsGate() })
+  void prefsStore.load()
 
   // ── JSON API ────────────────────────────────────────────────────────────
   const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace)
@@ -828,7 +1017,14 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         if (sessionId === null || dir === null || relativePath === null || relativePath.trim() === '') {
           throw new SidebarError('bad-request', 'sessionId, dir, and relativePath are required')
         }
-        const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+        const clientCwd = url.searchParams.get('cwd') ?? undefined
+    // Global file browser (config.allowOutsideWorkspace): a client-supplied
+    // absolute cwd is the browser root the docked terminal should follow, so
+    // it wins over the session workspace. Fenced mode keeps the authoritative
+    // session cwd and only falls back to the client value while hydrating.
+    const cwd = resolved.allowOutsideWorkspace && clientCwd !== undefined && isAbsolute(clientCwd)
+      ? clientCwd
+      : sessionCwdOf(ctx, sessionId, clientCwd)
         const { path, size } = await writeWorkspaceUpload({
           cwd,
           dir,
@@ -872,17 +1068,34 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
         const path = await ensureWorkspacePath(cwd, raw)
         const info = await stat(path)
-        if (!info.isFile() || info.size > resolved.mediaLimit) {
+        // Folder download: a directory streams as one zip (VS Code/code-server
+        // "Download…" behavior), never through readFile.
+        if (url.searchParams.get('download') === '1' && info.isDirectory()) {
+          await streamZip(path, res as unknown as ServerResponse)
+          return
+        }
+        if (!info.isFile()) throw new SidebarError('fs-error', 'not a file', 400)
+        // Download channels stream like code-server's file downloads: a plain
+        // GET with Content-Disposition, no size cap, no client-side blob. The
+        // preview channel keeps the mediaLimit + full-buffer contract.
+        if (url.searchParams.get('download') === '1') {
+          res.writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': String(info.size),
+            'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`,
+            'cache-control': 'no-cache',
+          })
+          const stream = createReadStream(path)
+          stream.on('error', () => (res as unknown as { destroy(): void }).destroy())
+          stream.pipe(res as unknown as Writable)
+          return
+        }
+        if (info.size > resolved.mediaLimit) {
           throw new SidebarError('fs-error', 'not a file or too large', 400)
         }
         const type = mediaTypeForPath(path)
         const body = await readFile(path)
-        // Raw bytes either way (binary-safe); ?download=1 switches the
-        // disposition so the browser saves the file instead of showing it.
         const headers: Record<string, string> = { 'content-type': type, 'cache-control': 'no-cache' }
-        if (url.searchParams.get('download') === '1') {
-          headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`
-        }
         res.writeHead(200, headers)
         res.end(body)
       } catch (error) {
@@ -1145,11 +1358,19 @@ async function attachTerminal(
       ws.close(1011, PTY_DEPS_MISSING)
       return
     }
-    const cwd = sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+    const terminalClientCwd = url.searchParams.get('cwd') ?? undefined
+    // Global file browser (config.allowOutsideWorkspace): a client-supplied
+    // absolute cwd is the browser root the docked terminal follows, so it
+    // wins over the session workspace. Fenced mode keeps the authoritative
+    // session cwd and only falls back to the client value while hydrating.
+    const cwd = resolved.allowOutsideWorkspace && terminalClientCwd !== undefined && isAbsolute(terminalClientCwd)
+      ? terminalClientCwd
+      : sessionCwdOf(ctx, sessionId, terminalClientCwd)
     // Settings-page shell overrides win over the yaml/auto shell for
     // terminals opened from now on (existing pty handles keep their shell).
     const overrides = shellOverridesOf(getSettings)
     const handle = ptyManager.open(sessionId, tabId, cwd, 80, 24, overrides.shell, overrides.shellArgs)
+    handle.views += 1
     // Replay the transcript, then follow live output.
     if (handle.transcript !== '') ws.send(handle.transcript)
     const onData = (data: string): void => {
@@ -1176,8 +1397,11 @@ async function attachTerminal(
         // Not JSON: terminal input.
       }
       if (control !== null && control.type === 'close') {
-        // The owning tab was closed: release the quota immediately.
-        ptyManager.scheduleClose(handle.key, 0)
+        // The owning tab was closed. A pty may be shared by several views
+        // (the same terminal position across conversations), so only the LAST
+        // view's close releases the process — otherwise closing one tab made
+        // every other tab on that shell print the exit banner.
+        if (handle.views <= 1) ptyManager.scheduleClose(handle.key, 0)
         return
       }
       if (control !== null && control.type === 'park') {
@@ -1205,6 +1429,7 @@ async function attachTerminal(
     ws.on('close', () => {
       dataSub.dispose()
       exitSub.dispose()
+      handle.views = Math.max(0, handle.views - 1)
       // A parked pty (the user switched conversations and sent `{type:'park'}`)
       // stays alive indefinitely — do NOT start the grace countdown. A bare
       // socket drop without a prior park (refresh, crash) starts the grace

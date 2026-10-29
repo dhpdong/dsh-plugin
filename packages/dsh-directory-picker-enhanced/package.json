@@ -1,6 +1,6 @@
 {
   "name": "dsh-directory-picker-enhanced",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Enhanced DSH browse directory picker UI with Up button and Windows drive selector",
   "type": "module",
   "main": "lib/index.js",
@@ -16,7 +16,6 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-locale"
       ],
@@ -27,11 +26,9 @@
     "clsx": "^2.0.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-workspace": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-locale": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2",
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/dsh-client-ui-workspace": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-rc.2",
+    "@deepseek-ai/cordis": "~4.0.5"
   },
   "files": [
     "lib/index.js",

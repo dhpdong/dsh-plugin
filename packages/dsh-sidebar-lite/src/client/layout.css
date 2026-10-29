@@ -42,6 +42,7 @@
    the SAME element on live pages (verified), and keeping both future-proofs
    the rule against a host rename without touching shell-specific markup. */
 #root [data-dsh-frame] > [data-pane="conversation"],
+#root :has(> [data-slot="main"]),
 #root :has(> [data-slot="conversation"]) {
   margin-bottom: var(--dsh-sidebar-height, 0px);
   /* Grid/flex items default to min-height:auto. A long unbreakable token
@@ -61,14 +62,17 @@
    cluster spans right 10→70px, so 78px clears it with an 8px gap. Anchor on
    the header's slot host wrapper ([data-slot="conversation.session.header"])
    rather than a positional path: DSH 0.1.x nests the header several levels
-   under the center column. The Sidebar shell toggles the body attribute with
-   the panel open state. */
+   under the center column, while 0.2 renders the <header> OUTSIDE that slot
+   (the slot only supplies the title row), so the ancestor form uses :has().
+   The Sidebar shell toggles the body attribute with the panel open state. */
+body[data-dsh-sidebar-collapsed] header:has([data-slot="conversation.session.header"]),
 body[data-dsh-sidebar-collapsed] [data-slot="conversation.session.header"] > header {
-  padding-right: 78px;
+  padding-right: 60px;
 }
 
 body[data-dsh-sidebar-dragging] #root,
 body[data-dsh-sidebar-dragging] #root [data-dsh-frame] > [data-pane="conversation"],
+body[data-dsh-sidebar-dragging] #root :has(> [data-slot="main"]),
 body[data-dsh-sidebar-dragging] #root :has(> [data-slot="conversation"]) {
   transition: none;
 }
@@ -95,7 +99,24 @@ body[data-dsh-sidebar-dragging] #root :has(> [data-slot="conversation"]) {
 @media (prefers-reduced-motion: reduce) {
   #root,
   #root [data-dsh-frame] > [data-pane="conversation"],
+  #root :has(> [data-slot="main"]),
   #root :has(> [data-slot="conversation"]) {
     transition: none;
   }
+}
+
+/* Terminal docked under the native right Sidebar (Sidebar.tsx sets the body
+   attribute while the column is open and the bottom panel is expanded). The
+   native column's absolute panel gives up exactly the terminal's height, so
+   its file tree ends above the terminal instead of the conversation losing
+   height at the bottom. `bottom` overrides the panel's `inset: 0`; the height
+   variable is written by the shell (and per frame during a height drag). */
+body[data-dsh-bottom-docked] [data-sidebar-right-panel="push"] {
+  transition: bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+body[data-dsh-bottom-docked] [data-sidebar-right-panel="push"][data-sidebar-right-open="true"] {
+  bottom: var(--dsh-bottom-dock-height, 0px);
+}
+body[data-dsh-sidebar-dragging] [data-sidebar-right-panel="push"] {
+  transition: none;
 }

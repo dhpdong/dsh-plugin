@@ -31,6 +31,8 @@ export interface WorkbenchActions {
   resizeSplit: (splitId: string, index: number, deltaFrac: number) => void
   /** Float a docked tab out as a free window (tab context menu entry). */
   floatTab: (tabId: string) => void
+  /** Retitle one tab (tab context menu entry). */
+  renameTab: (tabId: string, title: string) => void
 }
 
 /** One divider: pointer-capture drag translating px deltas into fractions.
@@ -211,6 +213,7 @@ function LeafView(props: {
           else actions.moveTabBefore(payload, leaf.id, before)
         }}
         onFloatTab={actions.floatTab}
+        onRenameTab={actions.renameTab}
       />
       {leaf.tabs.length > 0 ? (
         /*

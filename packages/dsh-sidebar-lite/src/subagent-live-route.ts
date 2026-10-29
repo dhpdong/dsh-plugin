@@ -16,7 +16,7 @@
  * - One child's events missing/corrupt → that child is skipped, the rest of
  *   the batch still returns.
  */
-import type { Context, SidebarSubagentsService } from './context-types.ts'
+import type { Context, SidebarSessionEvent, SidebarSubagentsService } from './context-types.ts'
 import { SIDE_LABEL_PREFIX } from './sidechat-core.ts'
 import { lastActivity, type LastActivity } from './subagent-activity.ts'
 import { requireString, SidebarError } from './wire.ts'
@@ -77,7 +77,12 @@ export function buildSubagentLiveApi(ctx: Context): SidebarSubagentLiveRoutes {
         if (entry.label?.startsWith(SIDE_LABEL_PREFIX) ?? false) continue
         try {
           const activity = lastActivity(
-            ctx.sessions.get(entry.id)?.events ?? [],
+            (() => {
+              const child = ctx.sessions.get(entry.id) as unknown as
+                | { snapshotEvents?(): readonly SidebarSessionEvent[]; events?: readonly SidebarSessionEvent[] }
+                | undefined
+              return child?.snapshotEvents?.() ?? child?.events ?? []
+            })(),
             LIVE_WINDOW_MESSAGES,
           )
           if (activity.text !== undefined || activity.tool !== undefined) {

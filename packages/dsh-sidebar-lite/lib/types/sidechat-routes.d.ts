@@ -1,3 +1,12 @@
+declare module '@deepseek-ai/dsh-llm' {
+    interface MessageSourceMap {
+        /** Sidebar-lite injected context (the side-conversation boundary). */
+        plugin: {
+            kind: 'plugin';
+            plugin: string;
+        };
+    }
+}
 import type { Context } from './context-types.ts';
 import { type SidechatThreadInfo } from './sidechat-core.ts';
 /** The five Side Chat routes of the sidebar API (wire method names). */

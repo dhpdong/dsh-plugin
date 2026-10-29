@@ -1529,3 +1529,24 @@ export class SidebarStore {
 export function createSidebarStore(): SidebarStore {
   return new SidebarStore()
 }
+
+/**
+ * Resolve the conversation currently shown in the main view.
+ *
+ * DSH 0.2 removed `SessionListState.current`; the current Session is the row
+ * retained by the `mainView` source (the same rule ui-session uses to publish
+ * its main binding). Reading it from the list snapshot keeps the sidebar
+ * subscribed to one store.
+ * @param list - the client Session list snapshot.
+ * @returns the current Session id, or undefined when no Session is open.
+ */
+export function currentSessionIdOf(list: {
+  ids: readonly string[]
+  byId: Record<string, object | undefined>
+}): string | undefined {
+  for (const id of list.ids) {
+    const retainedBy = (list.byId[id] as { retainedBy?: { mainView?: number } } | undefined)?.retainedBy
+    if ((retainedBy?.mainView ?? 0) > 0) return id
+  }
+  return undefined
+}

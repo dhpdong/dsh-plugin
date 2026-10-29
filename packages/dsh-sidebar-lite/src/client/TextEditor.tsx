@@ -19,7 +19,7 @@ import clsx from 'clsx'
 import { EditorState } from '@codemirror/state'
 import { EditorView as CodeMirrorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { IconCheckOutline16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckOutlineRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { api, htmlUrl } from './api.ts'
 import { rewriteLocalImageUrls } from './markdown-images.ts'
 import { languageForPath } from './lang.ts'
@@ -58,11 +58,14 @@ export const HTML_IFRAME_SANDBOX = 'allow-scripts allow-popups allow-downloads a
 
 export function TextEditor(props: FileViewerProps) {
   const { ctx, scope, path, viewerId, content, truncated } = props
-  const [mode, setMode] = useState<ViewMode>('preview')
+  const [mode, setMode] = useState<ViewMode>(props.initialMode === 'edit' ? 'edit' : 'preview')
   /** The editor's current text (null while clean); preview renders this. */
   const [draft, setDraft] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle')
+  /** Latest document text, for the auto-save idle timer and unmount flush. */
+  const liveRef = useRef(content ?? '')
+  const savedRef = useRef(content ?? '')
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<CodeMirrorView | null>(null)
   const savingRef = useRef(false)
@@ -128,7 +131,7 @@ export function TextEditor(props: FileViewerProps) {
     const state = EditorState.create({
       doc: content,
       extensions: [
-        CodeMirrorView.lineWrapping,
+        ...(props.lineWrapping === false ? [] : [CodeMirrorView.lineWrapping]),
         lineNumbers(),
         history(),
         EditorState.tabSize.of(2),
@@ -138,7 +141,9 @@ export function TextEditor(props: FileViewerProps) {
         ...(language !== null ? [language] : []),
         CodeMirrorView.updateListener.of((update) => {
           if (update.docChanged) {
-            setDraft(update.state.doc.toString())
+            const text = update.state.doc.toString()
+            liveRef.current = text
+            setDraft(text)
             setDirty(true)
           }
         }),
@@ -230,10 +235,17 @@ export function TextEditor(props: FileViewerProps) {
     if (view === null || savingRef.current) return
     savingRef.current = true
     setSaveState('saving')
-    api.fsWrite(scope, path, view.state.doc.toString()).then(() => {
+    const text = view.state.doc.toString()
+    api.fsWrite(scope, path, text).then(() => {
       savingRef.current = false
-      setDraft(null)
-      setDirty(false)
+      savedRef.current = text
+      // Only retire the dirty state when no newer keystroke arrived while
+      // the write was in flight; otherwise keep the draft (and its dot) so
+      // the next idle tick saves the newer text.
+      if (liveRef.current === text) {
+        setDraft(null)
+        setDirty(false)
+      }
       setSaveState('saved')
     }).catch(() => {
       savingRef.current = false
@@ -241,6 +253,24 @@ export function TextEditor(props: FileViewerProps) {
     })
   }
 
+  const saveRef = useRef(save)
+  saveRef.current = save
+  // Auto-save (the merged native editor pane): every idle pause after a
+  // change writes the draft, so switching files never needs a Save click.
+  useEffect(() => {
+    if (props.autoSave !== true || draft === null) return
+    const timer = window.setTimeout(() => { saveRef.current() }, 700)
+    return () => { window.clearTimeout(timer) }
+  }, [draft, props.autoSave])
+  // Last-chance flush when the pane unmounts mid-edit.
+  useEffect(() => {
+    if (props.autoSave !== true) return
+    return () => {
+      if (liveRef.current === savedRef.current) return
+      void api.fsWrite(scope, path, liveRef.current).catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const markdown = viewerId === 'markdown'
   const html = viewerId === 'html'
   /** The markdown source the preview renders (draft wins over saved content). */
@@ -380,7 +410,7 @@ export function TextEditor(props: FileViewerProps) {
             title={`${t('save')} (Ctrl/Cmd+S)`}
             onClick={save}
           >
-            <IconCheckOutline16 />
+            <IconCheckOutlineRegular />
           </button>
         )}
         {saveLabel !== '' && <span className={clsx(css.editorStatus, saveState === 'failed' && css.editorStatusError)}>{saveLabel}</span>}
@@ -422,7 +452,7 @@ export function TextEditor(props: FileViewerProps) {
             ? <MarkdownDocument info={htmlInfo} media={htmlMedia} codeLabels={codeLabels} />
             : hasMermaid
               ? <LazyMermaidMarkdown text={previewText} codeLabels={codeLabels} />
-              : <MarkdownText text={previewText} codeLabels={codeLabels} />}
+              : <MarkdownText text={previewText} labels={{ code: codeLabels, footnotes: 'Footnotes' }} />}
         </div>
       )}
       {html && mode === 'preview' && (
