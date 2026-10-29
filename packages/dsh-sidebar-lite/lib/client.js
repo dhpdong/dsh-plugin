@@ -19244,6 +19244,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 					ref: clusterRef,
 					className: sidebar_module_css_default.toggleCluster,
 					"data-dsh-toggle-cluster": true,
+					style: typeof location !== "undefined" && location.protocol === "dsh-app:" ? { top: "calc(19px + env(safe-area-inset-top))" } : void 0,
 					children: !narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
 						label: t("noSession"),
 						side: "bottom",
@@ -19355,6 +19356,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 						ref: clusterRef,
 						className: sidebar_module_css_default.toggleCluster,
 						"data-dsh-toggle-cluster": true,
+						style: typeof location !== "undefined" && location.protocol === "dsh-app:" ? { top: "calc(19px + env(safe-area-inset-top))" } : void 0,
 						children: !narrow && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
 							label: state.bottomOpen ? t("collapseBottomPanel") : t("expandBottomPanel"),
 							side: "bottom",
