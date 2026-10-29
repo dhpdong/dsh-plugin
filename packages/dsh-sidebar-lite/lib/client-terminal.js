@@ -8963,7 +8963,7 @@ globalThis.__dshChunks__["terminal"] = (require) => {
 			let retry;
 			let failures = 0;
 			const wsUrl = async () => {
-				const url = new URL("/sidebar/ws/terminal", await __dshHostBase());
+				const url = new URL("/sidebar/ws/terminal", await globalThis.__dshHostBase__());
 				url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 				if (isAgentTabId(tabId)) url.search = new URLSearchParams({ uuid: agentUuidOf(tabId) }).toString();
 				else {
@@ -9190,7 +9190,7 @@ globalThis.__dshChunks__["terminal"] = (require) => {
 };
 
 //# sourceMappingURL=client-terminal.js.map
-const __dshHostBase = /* @__PURE__ */ (() => {
+globalThis.__dshHostBase__ = globalThis.__dshHostBase__ || /* @__PURE__ */ (() => {
   let pending;
   return async () => {
     if (pending === void 0) pending = (async () => {

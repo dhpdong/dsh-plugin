@@ -18547,7 +18547,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				let failures = 0;
 				const connect = async () => {
 					if (closed) return;
-					const url = new URL("/sidebar/ws/agent-terminals", await __dshHostBase());
+					const url = new URL("/sidebar/ws/agent-terminals", await globalThis.__dshHostBase__());
 					if (closed) return;
 					url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 					url.search = new URLSearchParams({ sessionId }).toString();
@@ -18602,7 +18602,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				let failures = 0;
 				const connect = async () => {
 					if (closed) return;
-					const url = new URL("/sidebar/ws/agent-opens", await __dshHostBase());
+					const url = new URL("/sidebar/ws/agent-opens", await globalThis.__dshHostBase__());
 					if (closed) return;
 					url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 					url.search = new URLSearchParams({ sessionId }).toString();
@@ -21330,7 +21330,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 });
 
 //# sourceMappingURL=client.js.map
-const __dshHostBase = /* @__PURE__ */ (() => {
+globalThis.__dshHostBase__ = globalThis.__dshHostBase__ || /* @__PURE__ */ (() => {
   let pending;
   return async () => {
     if (pending === void 0) pending = (async () => {
