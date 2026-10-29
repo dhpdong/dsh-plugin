@@ -19241,7 +19241,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				"data-dsh-panel-host": true,
 				...osFileDragShield,
 				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					ref: clusterRef,
+					ref: (el) => { clusterRef.current = el; globalThis.__dshAlignCluster__?.(el); },
 					className: sidebar_module_css_default.toggleCluster,
 					"data-dsh-toggle-cluster": true,
 					style: typeof location !== "undefined" && location.protocol === "dsh-app:" ? { top: "calc(19px + env(safe-area-inset-top))" } : void 0,
@@ -19353,7 +19353,7 @@ Mode: this is a continuable side conversation. Your answers stay in this side th
 				...osFileDragShield,
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						ref: clusterRef,
+						ref: (el) => { clusterRef.current = el; globalThis.__dshAlignCluster__?.(el); },
 						className: sidebar_module_css_default.toggleCluster,
 						"data-dsh-toggle-cluster": true,
 						style: typeof location !== "undefined" && location.protocol === "dsh-app:" ? { top: "calc(19px + env(safe-area-inset-top))" } : void 0,
@@ -21347,5 +21347,38 @@ globalThis.__dshHostBase__ = globalThis.__dshHostBase__ || /* @__PURE__ */ (() =
       return location.origin;
     })();
     return pending;
+  };
+})();
+
+globalThis.__dshAlignCluster__ = globalThis.__dshAlignCluster__ || (() => {
+  let listening = false;
+  const alignOne = (el) => {
+    if (el === null || el === void 0 || el.isConnected !== true) return;
+    const corner = document.querySelector("[data-conversation-header-corner]");
+    if (corner === null) return;
+    const cr = el.getBoundingClientRect();
+    const tr = corner.getBoundingClientRect();
+    if (cr.height === 0 || tr.height === 0) return;
+    const delta = tr.top + tr.height / 2 - (cr.top + cr.height / 2);
+    if (Math.abs(delta) < 0.5) return;
+    const base = Number.parseFloat(window.getComputedStyle(el).top);
+    const current = Number.isFinite(base) ? base : 0;
+    el.style.top = current + delta + "px";
+  };
+  const alignAll = () => {
+    for (const el of document.querySelectorAll("[data-dsh-toggle-cluster]")) alignOne(el);
+  };
+  return (el) => {
+    if (el !== null && el !== void 0) {
+      if (el.__dshAlignScheduled === true) return;
+      el.__dshAlignScheduled = true;
+    }
+    alignOne(el);
+    for (const ms of [80, 200, 500, 1200, 2500]) window.setTimeout(() => alignOne(el), ms);
+    if (listening) return;
+    listening = true;
+    window.addEventListener("resize", alignAll);
+    const corner = document.querySelector("[data-conversation-header-corner]");
+    if (corner !== null && typeof ResizeObserver === "function") new ResizeObserver(alignAll).observe(corner);
   };
 })();
