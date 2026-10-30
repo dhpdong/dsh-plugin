@@ -31,6 +31,7 @@ window.__ModuleLoader__.load({
 .nfo-overlay{position:fixed;inset:0;z-index:2147483100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}
 .nfo-dialog{width:min(380px,90vw);padding:18px;border:1px solid var(--dsw-alias-border-l1,#333);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#18181d);box-shadow:0 20px 60px rgba(0,0,0,.5);font:13px/1.5 system-ui,sans-serif;color:var(--dsw-alias-label-primary,#eee)}
 .nfo-dialog h3{margin:0 0 12px;font-size:15px;font-weight:600}
+.nfo-dialog-text{margin:0;max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-all;color:var(--dsw-alias-label-secondary,#bbb);font-size:12.5px;line-height:1.6}
 .nfo-dialog input{box-sizing:border-box;width:100%;height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#444);border-radius:6px;background:transparent;color:inherit;font:inherit;outline:none}
 .nfo-dialog input:focus{border-color:var(--dsw-alias-button-info-fill,#4a7dff)}
 .nfo-dialog .nfo-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
@@ -500,8 +501,25 @@ window.__ModuleLoader__.load({
       else row.classList.remove('nfo-drop')
     }
 
+    /** Whether an event target lives inside the file explorer. */
+    function inExplorer(target) {
+      return !!(target && target.closest && target.closest('.nfo-x') !== null)
+    }
+
+    /**
+     * Claim an OS file drag for the tree. Returning early for targets outside
+     * the explorer keeps the chat composer's own drop zone working; inside it,
+     * the event is consumed so DSH never paints its full-screen "drop files
+     * here" overlay over the file panel.
+     */
+    function onFileDragEnter(event) {
+      if (!carriesFiles(event) || !inExplorer(event.target)) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
     function onFileDragOver(event) {
-      if (!carriesFiles(event)) return
+      if (!carriesFiles(event) || !inExplorer(event.target)) return
       event.preventDefault()
       event.stopPropagation()
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
@@ -593,8 +611,92 @@ window.__ModuleLoader__.load({
       return chain.then(function () { return out })
     }
 
+    /** Ask the user to choose one of several buttons; resolves to its id. */
+    function choiceDialog(title, message, choices) {
+      return new Promise(function (resolve) {
+        var overlay = document.createElement('div')
+        overlay.className = 'nfo-overlay'
+        var box = document.createElement('div')
+        box.className = 'nfo-dialog'
+        var heading = document.createElement('h3')
+        heading.textContent = title
+        var body = document.createElement('p')
+        body.className = 'nfo-dialog-text'
+        body.textContent = message
+        var actions = document.createElement('div')
+        actions.className = 'nfo-actions'
+        var settled = false
+        function finish(id) {
+          if (settled) return
+          settled = true
+          overlay.remove()
+          resolve(id)
+        }
+        choices.forEach(function (choice) {
+          var button = document.createElement('button')
+          button.type = 'button'
+          if (choice.primary === true) button.className = 'nfo-primary'
+          button.textContent = choice.label
+          button.addEventListener('click', function () { finish(choice.id) })
+          actions.appendChild(button)
+        })
+        box.appendChild(heading)
+        box.appendChild(body)
+        box.appendChild(actions)
+        overlay.appendChild(box)
+        overlay.addEventListener('mousedown', function (event) { if (event.target === overlay) finish(null) })
+        document.body.appendChild(overlay)
+      })
+    }
+
+    /** Names of one directory's direct children (missing dir → empty). */
+    function dirNames(ctx, dir) {
+      return sidebarCall(ctx, 'fs.tree', { path: dir }).then(function (listing) {
+        var names = {}
+        var entries = listing.entries || []
+        for (var i = 0; i < entries.length; i += 1) names[entries[i].name] = true
+        return names
+      }, function () {
+        // A directory that does not exist yet simply has no conflicts.
+        return {}
+      })
+    }
+
+    /** Absolute parent directory of one upload target. */
+    function targetDirOf(dir, relativePath) {
+      var cut = relativePath.lastIndexOf('/')
+      if (cut < 0) return dir
+      return (dir === '/' ? '' : dir.replace(/[\\/]+$/, '')) + '/' + relativePath.slice(0, cut)
+    }
+
+    /**
+     * Mark the uploads whose target already exists. One listing per directory
+     * (not per file), so a big folder drop costs a handful of requests.
+     */
+    function findConflicts(ctx, dir, uploads) {
+      var dirs = {}
+      uploads.forEach(function (item) { dirs[targetDirOf(dir, item.relativePath)] = true })
+      var names = {}
+      var paths = Object.keys(dirs)
+      var chain = Promise.resolve()
+      paths.forEach(function (path) {
+        chain = chain.then(function () {
+          return dirNames(ctx, path).then(function (result) { names[path] = result })
+        })
+      })
+      return chain.then(function () {
+        var conflicts = []
+        uploads.forEach(function (item) {
+          var parent = targetDirOf(dir, item.relativePath)
+          var name = item.relativePath.slice(item.relativePath.lastIndexOf('/') + 1)
+          if (names[parent] && names[parent][name] === true) conflicts.push(item)
+        })
+        return conflicts
+      })
+    }
+
     function onFileDrop(event) {
-      if (!carriesFiles(event)) return
+      if (!carriesFiles(event) || !inExplorer(event.target)) return
       event.preventDefault()
       event.stopPropagation()
       var marked = document.querySelectorAll('.nfo-drop')
@@ -609,6 +711,7 @@ window.__ModuleLoader__.load({
       status.textContent = L('正在上传…', 'Uploading…')
       document.body.appendChild(status)
       var done = 0
+      var skipped = 0
       var failed = []
       var started = entries === null ? Promise.resolve([]) : collectUploads(entries, '', [])
       started.then(function (uploads) {
@@ -618,6 +721,34 @@ window.__ModuleLoader__.load({
           for (var i = 0; i < files.length; i += 1) uploads.push({ relativePath: files[i].name, file: files[i] })
         }
         if (uploads.length === 0) throw new Error(L('没有可上传的文件', 'Nothing to upload'))
+        // Overwriting is never silent: ask once for the whole drop.
+        return findConflicts(ctx, dir, uploads).then(function (conflicts) {
+          if (conflicts.length === 0) return uploads
+          var sample = conflicts.slice(0, 5).map(function (item) { return item.relativePath }).join('\n')
+          var more = conflicts.length > 5 ? L('\n… 以及其他 ' + (conflicts.length - 5) + ' 个', '\n…and ' + (conflicts.length - 5) + ' more') : ''
+          return choiceDialog(
+            L('目标已存在同名文件', 'Files already exist'),
+            L('有 ' + conflicts.length + ' 个文件已存在：\n' + sample + more, conflicts.length + ' file(s) already exist:\n' + sample + more),
+            [
+              { id: 'skip', label: L('跳过这些文件', 'Skip them') },
+              { id: 'replace', label: L('全部替换', 'Replace all'), primary: true },
+              { id: 'cancel', label: L('取消', 'Cancel') },
+            ],
+          ).then(function (choice) {
+            if (choice === null || choice === 'cancel') return null
+            if (choice === 'skip') {
+              skipped = conflicts.length
+              return uploads.filter(function (item) { return conflicts.indexOf(item) < 0 })
+            }
+            return uploads
+          })
+        })
+      }).then(function (uploads) {
+        if (uploads === null) {
+          status.remove()
+          toast(L('已取消上传', 'Upload cancelled'))
+          return
+        }
         var chain = Promise.resolve()
         uploads.forEach(function (item) {
           chain = chain.then(function () {
@@ -633,9 +764,10 @@ window.__ModuleLoader__.load({
         return chain
       }).then(function () {
         status.remove()
-        if (failed.length === 0) toast(L('已上传 ' + done + ' 个文件', 'Uploaded ' + done + ' file(s)'))
-        else toast(L('上传完成 ' + done + ' 个，失败 ' + failed.length + ' 个：' + failed[0],
-          'Uploaded ' + done + ', failed ' + failed.length + ': ' + failed[0]))
+        var note = skipped > 0 ? L('，跳过 ' + skipped + ' 个同名文件', ', skipped ' + skipped) : ''
+        if (failed.length === 0) toast(L('已上传 ' + done + ' 个文件' + note, 'Uploaded ' + done + ' file(s)' + note))
+        else toast(L('上传完成 ' + done + ' 个' + note + '，失败 ' + failed.length + ' 个：' + failed[0],
+          'Uploaded ' + done + note + ', failed ' + failed.length + ': ' + failed[0]))
         refreshTree()
       }, function (error) {
         status.remove()
@@ -1800,6 +1932,7 @@ window.__ModuleLoader__.load({
       document.addEventListener('drop', onDrop, true)
       document.addEventListener('dragend', onDragEnd, true)
       // OS file drags: a separate path (the tree's own DnD only moves rows).
+      document.addEventListener('dragenter', onFileDragEnter, true)
       document.addEventListener('dragover', onFileDragOver, true)
       document.addEventListener('dragleave', onFileDragLeave, true)
       document.addEventListener('drop', onFileDrop, true)
@@ -1823,6 +1956,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('dragleave', onDragLeave, true)
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
+          document.removeEventListener('dragenter', onFileDragEnter, true)
           document.removeEventListener('dragover', onFileDragOver, true)
           document.removeEventListener('dragleave', onFileDragLeave, true)
           document.removeEventListener('drop', onFileDrop, true)
