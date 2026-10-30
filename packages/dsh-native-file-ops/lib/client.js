@@ -86,6 +86,7 @@ window.__ModuleLoader__.load({
 .nfo-x-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
 .nfo-x-hidden .nfo-x-name{opacity:.55}
 .nfo-x-note{padding:5px 14px;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.nfo-upload-status{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483200;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:8px 14px;border-radius:8px;background:rgba(30,30,36,.96);border:1px solid #444;color:#eee;font:13px system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.4)}
 .nfo-x-retry{cursor:pointer;color:var(--dsw-alias-label-secondary,#aaa);text-decoration:underline;text-underline-offset:2px}
 .nfo-picker{display:flex;flex-direction:column;width:min(520px,92vw);height:min(66vh,580px);gap:8px}
 .nfo-picker-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;padding:6px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#1e1e24);color:var(--dsw-alias-label-secondary,#aaa);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -465,6 +466,181 @@ window.__ModuleLoader__.load({
       draggingPath = null
       var marked = document.querySelectorAll('.nfo-drop')
       for (var i = 0; i < marked.length; i += 1) marked[i].classList.remove('nfo-drop')
+    }
+
+    // ── Drag files IN from the OS: copy them into the target folder ─────────
+    // The tree is a real file manager now, so dropping files/folders from the
+    // desktop must upload them to the row under the cursor (or the browser
+    // root when dropped on empty space). Bytes go through sidebar-lite's
+    // /sidebar/upload route; dropped DIRECTORIES are walked so their internal
+    // structure is recreated.
+
+    /** Whether this drag carries OS files (as opposed to a tree row). */
+    function carriesFiles(event) {
+      var dt = event.dataTransfer
+      if (!dt || !dt.types) return false
+      for (var i = 0; i < dt.types.length; i += 1) if (dt.types[i] === 'Files') return true
+      return false
+    }
+
+    /** The absolute directory a drop lands in (folder row, file row, or root). */
+    function dropDirOf(target) {
+      var row = rowOf(target)
+      if (row === null) return browserRoot()
+      var path = row.getAttribute('data-files-path') || ''
+      if (row.getAttribute('data-files-entry') === 'directory') return path
+      return parentOfPath(path)
+    }
+
+    function highlightDrop(target, on) {
+      var row = rowOf(target)
+      if (row === null) return
+      if (row.getAttribute('data-files-entry') !== 'directory') return
+      if (on) row.classList.add('nfo-drop')
+      else row.classList.remove('nfo-drop')
+    }
+
+    function onFileDragOver(event) {
+      if (!carriesFiles(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      var marked = document.querySelectorAll('.nfo-drop')
+      for (var i = 0; i < marked.length; i += 1) marked[i].classList.remove('nfo-drop')
+      highlightDrop(event.target, true)
+    }
+
+    function onFileDragLeave(event) {
+      if (!carriesFiles(event)) return
+      highlightDrop(event.target, false)
+    }
+
+    /** POST one blob to /sidebar/upload (the fenced byte carrier). */
+    function uploadBlob(ctx, dir, relativePath, blob) {
+      var state = ctxState(ctx)
+      if (state === undefined) return Promise.reject(new Error(L('没有活动会话', 'no active session')))
+      var params = new URLSearchParams({ sessionId: state.sessionId, dir: dir, relativePath: relativePath })
+      if (state.cwd) params.set('cwd', state.cwd)
+      return fetch('/sidebar/upload?' + params.toString(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: blob,
+      }).then(function (response) {
+        return response.json().then(function (result) {
+          if (!response.ok || !result.ok) {
+            throw new Error(result.error ? result.error.message : 'upload failed: ' + response.status)
+          }
+          return result.value
+        })
+      })
+    }
+
+    /** Every DataTransferItem that is a file or a directory entry. */
+    function entryListOf(dataTransfer) {
+      var items = dataTransfer.items
+      if (!items || typeof items[0] === 'undefined') return null
+      var entries = []
+      for (var i = 0; i < items.length; i += 1) {
+        var item = items[i]
+        if (item.kind !== 'file') continue
+        var entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null
+        if (entry) entries.push(entry)
+        else {
+          var file = item.getAsFile()
+          if (file) entries.push({ isFile: true, isDirectory: false, name: file.name, __file: file })
+        }
+      }
+      return entries.length > 0 ? entries : null
+    }
+
+    /** Read every child of a directory entry (readEntries yields in batches). */
+    function readAllChildren(reader) {
+      var all = []
+      return new Promise(function (resolve, reject) {
+        function next() {
+          reader.readEntries(function (batch) {
+            if (!batch || batch.length === 0) { resolve(all); return }
+            for (var i = 0; i < batch.length; i += 1) all.push(batch[i])
+            next()
+          }, reject)
+        }
+        next()
+      })
+    }
+
+    function fileOf(entry) {
+      if (entry.__file) return Promise.resolve(entry.__file)
+      return new Promise(function (resolve, reject) { entry.file(resolve, reject) })
+    }
+
+    /** Flatten the drop into {relativePath, file} pairs (folders keep depth). */
+    function collectUploads(entries, prefix, out) {
+      var chain = Promise.resolve()
+      entries.forEach(function (entry) {
+        chain = chain.then(function () {
+          var name = entry.name || 'file'
+          if (entry.isDirectory) {
+            if (typeof entry.createReader !== 'function') return
+            return readAllChildren(entry.createReader()).then(function (children) {
+              return collectUploads(children, prefix === '' ? name : prefix + '/' + name, out)
+            })
+          }
+          return fileOf(entry).then(function (file) {
+            out.push({ relativePath: prefix === '' ? name : prefix + '/' + name, file: file })
+          })
+        })
+      })
+      return chain.then(function () { return out })
+    }
+
+    function onFileDrop(event) {
+      if (!carriesFiles(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      var marked = document.querySelectorAll('.nfo-drop')
+      for (var i = 0; i < marked.length; i += 1) marked[i].classList.remove('nfo-drop')
+      var ctx = currentCtx
+      if (ctx === undefined) return
+      var dir = dropDirOf(event.target)
+      if (dir === '') { toast(L('没有可用的目标文件夹', 'No target folder')); return }
+      var entries = entryListOf(event.dataTransfer)
+      var status = document.createElement('div')
+      status.className = 'nfo-upload-status'
+      status.textContent = L('正在上传…', 'Uploading…')
+      document.body.appendChild(status)
+      var done = 0
+      var failed = []
+      var started = entries === null ? Promise.resolve([]) : collectUploads(entries, '', [])
+      started.then(function (uploads) {
+        if (uploads.length === 0) {
+          // Fallback: some browsers only expose File objects, no entries.
+          var files = event.dataTransfer.files
+          for (var i = 0; i < files.length; i += 1) uploads.push({ relativePath: files[i].name, file: files[i] })
+        }
+        if (uploads.length === 0) throw new Error(L('没有可上传的文件', 'Nothing to upload'))
+        var chain = Promise.resolve()
+        uploads.forEach(function (item) {
+          chain = chain.then(function () {
+            status.textContent = L('正在上传 ' + (done + 1) + '/' + uploads.length + '：' + item.relativePath,
+              'Uploading ' + (done + 1) + '/' + uploads.length + ': ' + item.relativePath)
+            return uploadBlob(ctx, dir, item.relativePath, item.file).then(function () {
+              done += 1
+            }, function (error) {
+              failed.push(item.relativePath + ': ' + (error && error.message ? error.message : error))
+            })
+          })
+        })
+        return chain
+      }).then(function () {
+        status.remove()
+        if (failed.length === 0) toast(L('已上传 ' + done + ' 个文件', 'Uploaded ' + done + ' file(s)'))
+        else toast(L('上传完成 ' + done + ' 个，失败 ' + failed.length + ' 个：' + failed[0],
+          'Uploaded ' + done + ', failed ' + failed.length + ': ' + failed[0]))
+        refreshTree()
+      }, function (error) {
+        status.remove()
+        toast(String(error && error.message ? error.message : error))
+      })
     }
 
     function markDraggable() {
@@ -1623,6 +1799,10 @@ window.__ModuleLoader__.load({
       document.addEventListener('dragleave', onDragLeave, true)
       document.addEventListener('drop', onDrop, true)
       document.addEventListener('dragend', onDragEnd, true)
+      // OS file drags: a separate path (the tree's own DnD only moves rows).
+      document.addEventListener('dragover', onFileDragOver, true)
+      document.addEventListener('dragleave', onFileDragLeave, true)
+      document.addEventListener('drop', onFileDrop, true)
       document.addEventListener('mousedown', function (event) {
         if (event.target.closest && event.target.closest('#dfo-menu') === null) closeMenu()
       }, true)
@@ -1643,6 +1823,9 @@ window.__ModuleLoader__.load({
           document.removeEventListener('dragleave', onDragLeave, true)
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
+          document.removeEventListener('dragover', onFileDragOver, true)
+          document.removeEventListener('dragleave', onFileDragLeave, true)
+          document.removeEventListener('drop', onFileDrop, true)
           closeMenu()
         }
       })
