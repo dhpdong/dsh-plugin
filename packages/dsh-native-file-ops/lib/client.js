@@ -1602,6 +1602,39 @@ window.__ModuleLoader__.load({
       window.WebSocket = Patched
     }
 
+    /**
+     * The native preview's reload button re-fetches the document, but the
+     * in-place editor covers the native body, so nothing visible changes.
+     * Drop the overlay once the native fetch had time to land; the auto-opener
+     * then re-reads the file and mounts a fresh editor (reload-from-disk
+     * semantics: pending edits are discarded, like every other preview tool).
+     */
+    function onPreviewReloadClick(event) {
+      var target = event.target
+      var button = target !== null && target !== void 0 && typeof target.closest === 'function'
+        ? target.closest('[data-textpreview-tool="reload"]')
+        : null
+      if (button === null) return
+      var tab = button.closest('[data-sidebar-right-tab]')
+      if (tab === null) return
+      var bodies = tab.querySelectorAll('[data-textpreview-body]')
+      var body = null
+      for (var i = 0; i < bodies.length; i += 1) {
+        if (bodies[i].getClientRects().length > 0) { body = bodies[i]; break }
+      }
+      if (body === null) return
+      var box = body.querySelector('.nfo-inplace')
+      if (box === null) return
+      window.setTimeout(function () {
+        var cleanup = box.__nfoCleanup
+        if (typeof cleanup === 'function') cleanup()
+        else box.remove()
+        body.removeAttribute('data-nfo-auto-skip')
+        body.removeAttribute('data-nfo-auto-pending')
+        scheduleAutoOpenEditors()
+      }, 350)
+    }
+
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
     exports.apply = function (ctx) {
       currentCtx = ctx
@@ -1640,6 +1673,7 @@ window.__ModuleLoader__.load({
       document.addEventListener('keydown', function (event) {
         if (event.key === 'Escape') closeMenu()
       }, true)
+      document.addEventListener('click', onPreviewReloadClick, true)
       ctx.effect(function () {
         return function () {
           observer.disconnect()
@@ -1654,6 +1688,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('dragleave', onDragLeave, true)
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
+          document.removeEventListener('click', onPreviewReloadClick, true)
           closeMenu()
         }
       })
