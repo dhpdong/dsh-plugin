@@ -734,6 +734,7 @@ window.__ModuleLoader__.load({
         if (typeof previous === 'function') previous()
         else existing.remove()
       }
+      preview.__nfoSnapshot = { path: path, content: initial }
       var wasPosition = preview.style.position
       var wasOverflow = preview.style.overflow
       if (window.getComputedStyle(preview).position === 'static') preview.style.position = 'relative'
@@ -1635,6 +1636,89 @@ window.__ModuleLoader__.load({
       }, 350)
     }
 
+    // ── Keep the in-place editor in sync with the file on disk ────────────
+    // External writes (another editor, a git checkout, the agent's own tools)
+    // change the file without touching this view, and the native preview's
+    // auto-refresh only re-renders the native body under our overlay. Poll the
+    // file and remount the editor when its content moved, and keep the
+    // snapshot current for the plugin's own auto-saved writes so a save never
+    // looks like an external change.
+    var previewSyncTimer = null
+
+    function sameNfoPath(a, b) {
+      return String(a).split('\\').join('/') === String(b).split('\\').join('/')
+    }
+
+    function updateWriteSnapshots(path, content) {
+      var bodies = document.querySelectorAll('[data-textpreview-body]')
+      for (var i = 0; i < bodies.length; i += 1) {
+        var snapshot = bodies[i].__nfoSnapshot
+        if (snapshot !== void 0 && sameNfoPath(snapshot.path, path)) snapshot.content = content
+      }
+    }
+
+    function installWriteSniffer() {
+      if (typeof window.fetch !== 'function' || window.fetch.__nfoSniffed === true) return
+      var nativeFetch = window.fetch
+      function sniffed(input, init) {
+        var url = typeof input === 'string'
+          ? input
+          : (input !== null && input !== void 0 && typeof input.url === 'string' ? input.url : '')
+        var writes = url.indexOf('/sidebar/api/fs.write') >= 0
+        var body = init !== null && init !== void 0 && typeof init.body === 'string' ? init.body : void 0
+        var pending = nativeFetch.apply(this, arguments)
+        if (!writes || body === void 0) return pending
+        return pending.then(function (response) {
+          try {
+            var payload = JSON.parse(body)
+            if (response.ok && typeof payload.path === 'string' && typeof payload.content === 'string') {
+              updateWriteSnapshots(payload.path, payload.content)
+            }
+          } catch (error) { /* not one of our payloads */ }
+          return response
+        })
+      }
+      sniffed.__nfoSniffed = true
+      window.fetch = sniffed
+    }
+
+    function syncPreviewEditors(ctx) {
+      var tabs = document.querySelectorAll('[data-sidebar-right-tab]')
+      for (var i = 0; i < tabs.length; i += 1) {
+        var tab = tabs[i]
+        if (tab.getClientRects().length === 0) continue
+        var bodies = tab.querySelectorAll('[data-textpreview-body]')
+        var body = null
+        for (var j = 0; j < bodies.length; j += 1) {
+          if (bodies[j].getClientRects().length > 0) { body = bodies[j]; break }
+        }
+        if (body === null) continue
+        var box = body.querySelector('.nfo-inplace')
+        if (box === null) continue
+        var snapshot = body.__nfoSnapshot
+        if (snapshot === void 0) continue
+        if (body.__nfoSyncing === true) continue
+        // Never fight the user: the editor owns focus while it is being typed
+        // in, so external reloads wait for the next tick after blur.
+        if (box.contains(document.activeElement)) continue
+        body.__nfoSyncing = true
+        ;(function (targetBody, targetBox, target) {
+          sidebarCall(ctx, 'fs.read', { path: target.path }).then(function (value) {
+            targetBody.__nfoSyncing = false
+            if (value === null || value === void 0 || typeof value.content !== 'string') return
+            if (value.content === target.content) return
+            if (!targetBox.isConnected) return
+            var cleanup = targetBox.__nfoCleanup
+            if (typeof cleanup === 'function') cleanup()
+            else targetBox.remove()
+            targetBody.removeAttribute('data-nfo-auto-skip')
+            targetBody.removeAttribute('data-nfo-auto-pending')
+            scheduleAutoOpenEditors()
+          }).catch(function () { targetBody.__nfoSyncing = false })
+        })(body, box, snapshot)
+      }
+    }
+
     exports.inject = ['sessions', 'locale', 'uiSession', 'slots']
     exports.apply = function (ctx) {
       currentCtx = ctx
@@ -1674,6 +1758,8 @@ window.__ModuleLoader__.load({
         if (event.key === 'Escape') closeMenu()
       }, true)
       document.addEventListener('click', onPreviewReloadClick, true)
+      installWriteSniffer()
+      previewSyncTimer = window.setInterval(function () { syncPreviewEditors(ctx) }, 2000)
       ctx.effect(function () {
         return function () {
           observer.disconnect()
@@ -1689,6 +1775,10 @@ window.__ModuleLoader__.load({
           document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('dragend', onDragEnd, true)
           document.removeEventListener('click', onPreviewReloadClick, true)
+          if (previewSyncTimer !== null) {
+            window.clearInterval(previewSyncTimer)
+            previewSyncTimer = null
+          }
           closeMenu()
         }
       })
