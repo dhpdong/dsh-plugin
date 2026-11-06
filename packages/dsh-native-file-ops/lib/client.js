@@ -502,6 +502,34 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Restore the editor's scroll position after a remount: an external change
+     * replaces the CodeMirror instance, and the fresh one starts at the top.
+     * The scroller only accepts a scrollTop once the content has been laid out,
+     * so retry for a few frames (the changed file may still be short).
+     */
+    function restoreEditorScroll(box, restore) {
+      var tries = 0
+      function apply() {
+        tries += 1
+        var scroller = box.querySelector('.cm-scroller')
+        if (scroller !== null) {
+          scroller.scrollTop = restore.top
+          if (restore.left !== 0) scroller.scrollLeft = restore.left
+          if (Math.abs(scroller.scrollTop - restore.top) <= 1 || tries >= 40) return
+        }
+        if (tries < 40) window.requestAnimationFrame(apply)
+      }
+      window.requestAnimationFrame(apply)
+    }
+
+    /** Snapshot the current scroll offset so a remount can restore it. */
+    function captureEditorScroll(box) {
+      var scroller = box === null || box === void 0 ? null : box.querySelector('.cm-scroller')
+      if (scroller === null) return void 0
+      return { top: scroller.scrollTop, left: scroller.scrollLeft }
+    }
+
     function openTextEditor(ctx, path, button) {
       // Resolve the preview body up front so a second pencil click focuses
       // the running editor instead of re-reading and discarding edits.
@@ -784,6 +812,11 @@ window.__ModuleLoader__.load({
           initialMode: 'edit',
           lineWrapping: false,
         }))
+        var pendingScroll = preview.__nfoRestoreScroll
+        if (pendingScroll !== void 0) {
+          preview.__nfoRestoreScroll = void 0
+          restoreEditorScroll(box, pendingScroll)
+        }
       }).catch(function () {
         cleanup()
         showTextEditor(ctx, path, initial)
@@ -1627,6 +1660,7 @@ window.__ModuleLoader__.load({
       var box = body.querySelector('.nfo-inplace')
       if (box === null) return
       window.setTimeout(function () {
+        body.__nfoRestoreScroll = captureEditorScroll(box)
         var cleanup = box.__nfoCleanup
         if (typeof cleanup === 'function') cleanup()
         else box.remove()
@@ -1708,6 +1742,7 @@ window.__ModuleLoader__.load({
             if (value === null || value === void 0 || typeof value.content !== 'string') return
             if (value.content === target.content) return
             if (!targetBox.isConnected) return
+            targetBody.__nfoRestoreScroll = captureEditorScroll(targetBox)
             var cleanup = targetBox.__nfoCleanup
             if (typeof cleanup === 'function') cleanup()
             else targetBox.remove()
