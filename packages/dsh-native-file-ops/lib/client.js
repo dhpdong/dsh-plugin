@@ -503,31 +503,70 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Restore the editor's scroll position after a remount: an external change
-     * replaces the CodeMirror instance, and the fresh one starts at the top.
-     * The scroller only accepts a scrollTop once the content has been laid out,
-     * so retry for a few frames (the changed file may still be short).
+     * Restore the reading position after a remount. The editor runs with
+     * `lineWrapping: false`, so every line is the same height and a line index
+     * maps to a pixel offset. Anchor on the TEXT of the line at the top of the
+     * viewport: if the external change inserted or removed lines above it, the
+     * same text is found again (searching outward from the expected index) and
+     * the viewport lands on the same content instead of the same pixel.
+     * Falls back to the raw offset when no anchor is available.
      */
-    function restoreEditorScroll(box, restore) {
+    function restoreEditorScroll(box, restore, content) {
       var tries = 0
+      var targetTop = restore.top
+      var docLines = typeof content === 'string' ? content.split('\n') : null
+      var solved = false
       function apply() {
         tries += 1
         var scroller = box.querySelector('.cm-scroller')
         if (scroller !== null) {
-          scroller.scrollTop = restore.top
-          if (restore.left !== 0) scroller.scrollLeft = restore.left
-          if (Math.abs(scroller.scrollTop - restore.top) <= 1 || tries >= 40) return
+          var lines = box.querySelectorAll('.cm-line')
+          if (lines.length > 0) {
+            var measured = lines[0].getBoundingClientRect().height
+            var lineHeight = measured > 0 ? measured : restore.lineHeight
+            if (!solved) {
+              solved = true
+              if (docLines !== null && restore.text !== '' && lineHeight > 0) {
+                var approx = Math.max(0, Math.round(restore.top / (restore.lineHeight || lineHeight)))
+                var found = -1
+                if (docLines[approx] === restore.text) found = approx
+                else {
+                  for (var d = 1; d <= 500 && found < 0; d += 1) {
+                    if (approx - d >= 0 && docLines[approx - d] === restore.text) found = approx - d
+                    else if (approx + d < docLines.length && docLines[approx + d] === restore.text) found = approx + d
+                  }
+                }
+                if (found >= 0) targetTop = found * lineHeight + restore.delta
+              }
+            }
+            scroller.scrollTop = targetTop
+            if (restore.left !== 0) scroller.scrollLeft = restore.left
+            if (Math.abs(scroller.scrollTop - targetTop) <= 1 || tries >= 40) return
+          }
         }
         if (tries < 40) window.requestAnimationFrame(apply)
       }
       window.requestAnimationFrame(apply)
     }
 
-    /** Snapshot the current scroll offset so a remount can restore it. */
+    /** Snapshot the reading position so a remount can restore it. */
     function captureEditorScroll(box) {
       var scroller = box === null || box === void 0 ? null : box.querySelector('.cm-scroller')
       if (scroller === null) return void 0
-      return { top: scroller.scrollTop, left: scroller.scrollLeft }
+      var top = scroller.scrollTop
+      var anchor = { text: '', delta: 0 }
+      var lineHeight = 0
+      var lines = box.querySelectorAll('.cm-line')
+      var scRect = scroller.getBoundingClientRect()
+      for (var i = 0; i < lines.length; i += 1) {
+        var rect = lines[i].getBoundingClientRect()
+        if (rect.height > 0 && lineHeight === 0) lineHeight = rect.height
+        if (rect.top + rect.height > scRect.top) {
+          anchor = { text: lines[i].textContent, delta: scRect.top - rect.top }
+          break
+        }
+      }
+      return { top: top, left: scroller.scrollLeft, text: anchor.text, delta: anchor.delta, lineHeight: lineHeight }
     }
 
     function openTextEditor(ctx, path, button) {
@@ -815,7 +854,7 @@ window.__ModuleLoader__.load({
         var pendingScroll = preview.__nfoRestoreScroll
         if (pendingScroll !== void 0) {
           preview.__nfoRestoreScroll = void 0
-          restoreEditorScroll(box, pendingScroll)
+          restoreEditorScroll(box, pendingScroll, initial)
         }
       }).catch(function () {
         cleanup()
